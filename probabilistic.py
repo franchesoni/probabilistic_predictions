@@ -15,7 +15,7 @@ def generate_mixture_params():
     x, y = np.meshgrid(x, y)
     # compute the mixture parameter as a slowly chaning image
     # z = np.sin(2 * np.pi * x) * np.sin(2 * np.pi * y)  # four blobs
-    z = np.exp(-((x - 0.5) ** 2 + (y - 0.5) ** 2) / 0.3 ** 2)  # one blob
+    z = np.exp(-((x - 0.5) ** 2 + (y - 0.5) ** 2) / 0.3**2)  # one blob
     # normalize to [0,1]
     z = (z - z.min()) / (z.max() - z.min())
     return x, y, z
@@ -32,6 +32,7 @@ def plot_mixture_param(x, y, z):
     ax.figure.colorbar(ax.imshow(z, cmap="gray"))
     plt.show()
 
+
 def sample_point_from_mixture(mixture_factor, g1_mean, g1_std, g2_mean, g2_std):
     """Samples a point from a mixture of two truncated Gaussians."""
     if np.random.rand() < mixture_factor:
@@ -41,6 +42,7 @@ def sample_point_from_mixture(mixture_factor, g1_mean, g1_std, g2_mean, g2_std):
     a, b = (0 - loc) / scale, (1 - loc) / scale
     return truncnorm.rvs(a, b, loc=loc, scale=scale, size=1)
 
+
 def generate_data(N, x, y, z, g1_mean, g1_std, g2_mean, g2_std):
     """Generates a dataset of points sampled from a mixture of two truncated Gaussians."""
     X, targets = [], []
@@ -49,8 +51,11 @@ def generate_data(N, x, y, z, g1_mean, g1_std, g2_mean, g2_std):
         j = np.random.randint(x.shape[1])
         X.append((x[i, j], y[i, j]))
         mixture_factor = z[i, j]
-        targets.append(sample_point_from_mixture(mixture_factor, g1_mean, g1_std, g2_mean, g2_std))
+        targets.append(
+            sample_point_from_mixture(mixture_factor, g1_mean, g1_std, g2_mean, g2_std)
+        )
     return np.array(X), np.array(targets)
+
 
 def plot_data_3d(X, targets):
     """Creates a scatter 3D plot that shows the data points and their targets."""
@@ -61,6 +66,7 @@ def plot_data_3d(X, targets):
     ax.set_ylabel("y")
     ax.set_zlabel("z")
     plt.show()
+
 
 def plot_data_2d(X, targets):
     """Creates 2d plots by averaging over the z-axis."""
@@ -83,19 +89,18 @@ def plot_data_2d(X, targets):
     # add colorbar
     ax.figure.colorbar(ax.imshow(image, cmap="viridis"))
     plt.show()
-    
+
 
 def main(
     # set parameters
-    SEED = 0,
-    N = 100000,
-    g1_mean = 0.3 ,
-    g1_std = 0.4 ,
-    g2_mean = 0.6,
-    g2_std = 0.1,
-    visualize = False,
+    SEED=0,
+    N=10000,
+    g1_mean=0.3,
+    g1_std=0.4,
+    g2_mean=0.6,
+    g2_std=0.1,
+    visualize=False,
 ):
-    
     # get data
     np.random.seed(SEED)
     x, y, z = generate_mixture_params()
@@ -105,17 +110,25 @@ def main(
         plot_data_3d(X, targets)
         plot_data_2d(X, targets)
 
+    X_train, y_train, X_cal, y_cal, X_test, y_test = (
+        X[: N // 2],
+        targets[: N // 2],
+        X[N // 2 : 3 * N // 4],
+        targets[N // 2 : 3 * N // 4],
+        X[3 * N // 4 :],
+        targets[3 * N // 4 :],
+    )
     # run methods
     for method in methods:
         # get predictions
-        X, targets = torch.from_numpy(X).float(), torch.from_numpy(targets).float() 
-        predictions = method.fit_predict(X, targets)
+        X_train_torch, y_train_torch = torch.from_numpy(X_train).float(), torch.from_numpy(y_train).float()
+        predictions = method.fit_predict(X_train_torch, y_train_torch)
         # compute error
         # TO-DO
 
 
 if __name__ == "__main__":
     from fire import Fire
+
     Fire(main)
     # cProfile.run("main()", sort="cumtime", filename="probabilistic.profile")
-
