@@ -1,11 +1,14 @@
+from functools import partial
 import matplotlib.pyplot as plt
 import tqdm
 import numpy as np
 from scipy.stats import truncnorm
 import torch
 import cProfile
+from base_methods import MLP, fit_torch, predict_torch
 
 from methods import methods
+from metrics import crps_single_prediction
 
 
 def generate_mixture_params():
@@ -105,6 +108,7 @@ def main(
     np.random.seed(SEED)
     x, y, z = generate_mixture_params()
     X, targets = generate_data(N, x, y, z, g1_mean, g1_std, g2_mean, g2_std)
+    X, targets = torch.from_numpy(X).float(), torch.from_numpy(targets).float()
     if visualize:
         plot_mixture_param(x, y, z)
         plot_data_3d(X, targets)
@@ -119,12 +123,27 @@ def main(
         targets[3 * N // 4 :],
     )
     # run methods
-    for method in methods:
+    for method_name in methods:
+        method_class = methods[method_name]
+        print('running method {}'.format(method_name))
+        method = method_class()
+        # get model
+        model = MLP(output_dim=method.get_mlp_output_dim())
         # get predictions
-        X_train_torch, y_train_torch = torch.from_numpy(X_train).float(), torch.from_numpy(y_train).float()
-        predictions = method.fit_predict(X_train_torch, y_train_torch)
+        fit_torch(model, X_train, y_train)
+        # calibrate
+        predictions_cal = predict_torch(model, X_cal)
+        method.compute_extra_params(predictions_cal, y_cal)
+        lower_bound, upper_bound = y_cal.min(), y_cal.max()
         # compute error
-        # TO-DO
+        avg_crps, counter = 0, 0
+        for ind, x in enumerate(X_test):
+            prediction = predict_torch(model, x[None])
+            predicted_cdf = partial(method.__class__.predict_cdf, method, prediction.squeeze())
+            avg_crps = avg_crps * (counter / (counter+1)) + crps_single_prediction(predicted_cdf, y_test[ind], lower_bound, upper_bound) / (counter+1)
+            counter += 1
+            print(f'sample {ind}/{len(X_test)}, avg_crps={avg_crps}', end='\r')
+        print('Final CRPS:', avg_crps)
 
 
 if __name__ == "__main__":

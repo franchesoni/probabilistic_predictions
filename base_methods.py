@@ -4,36 +4,18 @@ import torch
 import torch.nn as nn
 
 
-class BaseProbabilisticPredictor(ABC):
+class BaseProbabilisticMethod(ABC):
     @abstractmethod
-    def fit(self, X, y):
+    def get_mlp_output_dim(self):
         pass
 
     @abstractmethod
-    def predict_distribution(self, X):
-        pass
-
-
-class BaseDeterministicPredictor(ABC):
-    @abstractmethod
-    def fit(self, X, y):
+    def predict_cdf(self, dist_param_prediction, point_to_evaluate):
         pass
 
     @abstractmethod
-    def predict(self, X):
+    def loss_fn(self, y_pred, y_target):
         pass
-
-    def fit_predict(self, X, y):
-        self.fit(X, y)
-        return self.predict(X)
-
-    def predict_distribution(self, X, support_start, support_end):
-        assert support_start < support_end
-        prediction = self.predict(X)
-        assert prediction >= support_start and prediction <= support_end
-        bins = np.array([support_start, prediction, support_end])
-        probs = np.array([0.5, 0.5])
-        return bins, probs
 
 class ResidualBlock(nn.Module):
     def __init__(self, input_dim, output_dim, norm_layer=nn.BatchNorm1d, act_layer=nn.ReLU, dropout=0., bias=True):
@@ -54,7 +36,7 @@ class ResidualBlock(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, output_dim, input_dim=2, hidden_dim=32, n_hidden=2):
+    def __init__(self, output_dim, input_dim=2, hidden_dim=64, n_hidden=4):
         super().__init__()
         assert n_hidden >= 2
         self.initial_layer = ResidualBlock(input_dim, hidden_dim)
@@ -73,7 +55,7 @@ class MLP(nn.Module):
 
 
 
-def fit_deterministic_model_torch(
+def fit_torch(
     model,
     X,
     y,
@@ -82,7 +64,7 @@ def fit_deterministic_model_torch(
     lr=1e-2,
     n_epochs=24,
     optim="adamw",
-    verbose=False,
+    verbose=True,
 ):
     optimizer = (
         torch.optim.AdamW(model.parameters(), lr=lr)
@@ -100,11 +82,11 @@ def fit_deterministic_model_torch(
             loss.backward()
             optimizer.step()
         if verbose:
-            print(f"Epoch {i+1}/{n_epochs}, loss={loss.item():.4f}")
+            print(f"Epoch {i+1}/{n_epochs}, loss={loss.item():.4f}", end="\r")
     return model
 
 
-def predict_deterministic_model_torch(model, X, batch_size=16384):
+def predict_torch(model, X, batch_size=16384):
     model.eval()
     with torch.no_grad():
         y_pred = torch.zeros(X.shape[0])

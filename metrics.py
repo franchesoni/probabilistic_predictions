@@ -1,24 +1,19 @@
-import numpy as np
 
-def CRPS(predictions, targets):
+
+# gpt4 says:
+from scipy.integrate import quad
+def crps_single_prediction(predicted_cdf, ground_truth, lower_bound, upper_bound):
     """
-    Computes the CRPS score.
-    `predictions` is a tuple with `bins` and `probs`.
-    `targets` is an array of floats.
+    Compute the CRPS for a single prediction.
+
+    :param predicted_cdf: Function that computes the predicted CDF at a given point.
+    :param ground_truth: The observed ground truth value.
+    :param lower_bound: Lower bound for integration.
+    :param upper_bound: Upper bound for integration.
+    :return: CRPS for the given prediction.
     """
-    assert predictions.shape[0] == targets.shape[0]
+    def integrand(x):
+        return (predicted_cdf(x) - 1*(x >= ground_truth))**2
 
-def single_CRPS(bins, probs, target):
-    assert sorted(bins) == bins
-    assert len(bins) == len(probs) + 1
-    # find the CDF
-
-def get_CDF(bins, probs):
-    assert sorted(bins) == bins
-    assert len(bins) == len(probs) + 1
-    """Gives the probability that a value is less than or equal to the bin."""
-    CDF = np.zeros(len(bins))  # before, bin1 start, bin2 start, ..., bin N start, bin N end, after
-    for i in range(1, len(bins)):
-        CDF[i] = CDF[i - 1] + probs[i - 1]
-    CDF[-1] = 1
-    return CDF
+    crps, _ = quad(integrand, lower_bound, upper_bound)
+    return crps
