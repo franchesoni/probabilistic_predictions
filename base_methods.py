@@ -62,9 +62,10 @@ def fit_torch(
     loss_fn=nn.functional.l1_loss,
     batch_size=16384,
     lr=1e-2,
-    n_epochs=24,
+    n_epochs=2400,
     optim="adamw",
     verbose=True,
+    extra_metrics={}
 ):
     optimizer = (
         torch.optim.AdamW(model.parameters(), lr=lr)
@@ -81,8 +82,12 @@ def fit_torch(
             loss = loss_fn(y_pred, y_batch)
             loss.backward()
             optimizer.step()
+            with torch.no_grad():
+                extras = {}
+                for name, metric in extra_metrics.items():
+                    extras[name] = metric(y_pred, y_batch)
         if verbose:
-            print(f"Epoch {i+1}/{n_epochs}, loss={loss.item():.4f}", end="\r")
+            print(f"Epoch {i+1}/{n_epochs}, loss={loss.item():.4f}, extras={extras}", end="\r")
     return model
 
 
