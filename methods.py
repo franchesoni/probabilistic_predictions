@@ -20,8 +20,27 @@ class MeanValStd(BaseProbabilisticMethod):
     def loss_fn(self, y_pred, y_target):
         return torch.mean((y_pred - y_target) ** 2)
         
+class MeanStd(BaseProbabilisticMethod):
+    def get_mlp_output_dim(self):
+        return 2  # predict mean and std 
+
+    def compute_extra_params(self, cal_preds, cal_targets):
+        pass
+
+    def predict_cdf(self, dist_param_prediction, point_to_evaluate):
+        """Given the mean and the variance we compute the P(X<`point_to_evaluate`)."""
+        mean, var = dist_param_prediction
+        # evaluate point given mean and std
+        std = torch.sqrt(var)
+        dist = torch.distributions.Normal(mean, std)
+        cdf = dist.cdf(torch.Tensor([point_to_evaluate]))
+        return cdf.item()
+
+    def loss_fn(self, y_pred, y_target):
+        return torch.nn.GaussianNLLLoss()(y_pred, y_target)
 
 methods = {
-    "MeanValStd": MeanValStd,
+    # "MeanValStd": MeanValStd,
+    "MeanStd": MeanStd,
 }
 
