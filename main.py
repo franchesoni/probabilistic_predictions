@@ -1,153 +1,106 @@
 from functools import partial
-import matplotlib.pyplot as plt
-import tqdm
-import numpy as np
-from scipy.stats import truncnorm
-import torch
 import cProfile
+import os
+from pathlib import Path
+import sys
+
+from fire import Fire
+import numpy as np
+import torch
+
 from base_methods import MLP, fit_torch, predict_torch
-
 from methods import methods
-from metrics import crps_single_prediction
+from metrics import crps_batch_prediction, crps_single_prediction
+from data import generate_mixture_params, generate_data, plot_mixture_param, plot_data_3d, plot_data_2d
 
-
-def generate_mixture_params():
-    """Generates a single-channel 2d gradient image that represents a mixture parameter in [0,1]."""
-    x = np.linspace(0, 1, 101)
-    y = np.linspace(0, 1, 101)
-    x, y = np.meshgrid(x, y)
-    # compute the mixture parameter as a slowly chaning image
-    # z = np.sin(2 * np.pi * x) * np.sin(2 * np.pi * y)  # four blobs
-    z = np.exp(-((x - 0.5) ** 2 + (y - 0.5) ** 2) / 0.3**2)  # one blob
-    # normalize to [0,1]
-    z = (z - z.min()) / (z.max() - z.min())
-    return x, y, z
-
-
-def plot_mixture_param(x, y, z):
-    """Plots a single-channel 2d gradient image that represents a mixture parameter in [0,1]."""
-    fig, ax = plt.subplots()
-    ax.imshow(z, cmap="gray", interpolation="nearest")
-    ax.set_title("Mixture Parameter")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    # add colorbar
-    ax.figure.colorbar(ax.imshow(z, cmap="gray"))
-    plt.show()
-
-
-def sample_point_from_mixture(mixture_factor, g1_mean, g1_std, g2_mean, g2_std):
-    """Samples a point from a mixture of two truncated Gaussians."""
-    if np.random.rand() < mixture_factor:
-        loc, scale = g1_mean, g1_std
-    else:
-        loc, scale = g2_mean, g2_std
-    a, b = (0 - loc) / scale, (1 - loc) / scale
-    return truncnorm.rvs(a, b, loc=loc, scale=scale, size=1)
-
-
-def generate_data(N, x, y, z, g1_mean, g1_std, g2_mean, g2_std):
-    """Generates a dataset of points sampled from a mixture of two truncated Gaussians."""
-    X, targets = [], []
-    for _ in range(N):
-        i = np.random.randint(x.shape[0])
-        j = np.random.randint(x.shape[1])
-        X.append((x[i, j], y[i, j]))
-        mixture_factor = z[i, j]
-        targets.append(
-            sample_point_from_mixture(mixture_factor, g1_mean, g1_std, g2_mean, g2_std)
-        )
-    return np.array(X), np.array(targets)
-
-
-def plot_data_3d(X, targets):
-    """Creates a scatter 3D plot that shows the data points and their targets."""
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    ax.scatter(X[:, 0], X[:, 1], targets, c="r", marker="o")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
-    plt.show()
-
-
-def plot_data_2d(X, targets):
-    """Creates 2d plots by averaging over the z-axis."""
-    assert targets.shape[0] == X.shape[0]
-    # create the image
-    image = np.zeros((101, 101))
-    counts = np.zeros((101, 101))
-    for n in tqdm.tqdm(range(len(X))):
-        j = int(np.round(X[n, 0] * 100))
-        i = int(np.round(X[n, 1] * 100))
-        image[i, j] += targets[n]
-        counts[i, j] += 1
-    image = np.nan_to_num(image / counts)
-    # plot the image
-    fig, ax = plt.subplots()
-    ax.imshow(image, cmap="viridis", interpolation="nearest")
-    ax.set_title("Data")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    # add colorbar
-    ax.figure.colorbar(ax.imshow(image, cmap="viridis"))
-    plt.show()
 
 
 def main(
-    # set parameters
     SEED=0,
-    N=10000,
+    N=100000,
     g1_mean=0.3,
     g1_std=0.4,
     g2_mean=0.6,
     g2_std=0.1,
     visualize=False,
+    size=10,
+    epochs=6,
+    batch_size=1024,
+    lr=1,
+    extra_metrics_every=1,
 ):
     # get data
     np.random.seed(SEED)
-    x, y, z = generate_mixture_params()
+    x, y, z = generate_mixture_params(size)
     X, targets = generate_data(N, x, y, z, g1_mean, g1_std, g2_mean, g2_std)
     X, targets = torch.from_numpy(X).float(), torch.from_numpy(targets).float()
-    if visualize:
+    if visualize:  # visualize data (optional)
         plot_mixture_param(x, y, z)
         plot_data_3d(X, targets)
         plot_data_2d(X, targets)
 
+    # split data
     X_train, y_train, X_cal, y_cal, X_test, y_test = (
-        X[: N // 2],
-        targets[: N // 2],
-        X[N // 2 : 3 * N // 4],
-        targets[N // 2 : 3 * N // 4],
-        X[3 * N // 4 :],
-        targets[3 * N // 4 :],
+        X[:-2000],
+        targets[:-2000],
+        X[-2000:-1000],
+        targets[-2000:-1000],
+        X[-1000:],
+        targets[-1000:],
     )
     # run methods
     for method_name in methods:
+        print(">" * 80)
+        print("running method {}".format(method_name))
+        # get method
         method_class = methods[method_name]
-        print('running method {}'.format(method_name))
-        method = method_class()
+        method = method_class()  # defines the output_dim, loss_fn, distribution prediction, etc.
         # get model
         model = MLP(output_dim=method.get_mlp_output_dim())
-        # get predictions
-        fit_torch(model, X_train, y_train)
-        # calibrate
+        # train model
+        fit_torch(
+            model,
+            X_train,
+            y_train,
+            extra_metrics={  # extra metrics computed at every epoch
+                "crps": partial(
+                    crps_batch_prediction,
+                    lambda *args, **kwargs: method.get_cdf_func(*args, **kwargs),
+                    lambda *args, **kwargs: method.get_bounds(*args, **kwargs),
+                )
+            },
+            loss_fn=method.loss_fn,
+            n_epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            extra_metrics_every=extra_metrics_every,
+        )
+        # calibrate (compute other necessary params using the calibration set)
         predictions_cal = predict_torch(model, X_cal)
         method.compute_extra_params(predictions_cal, y_cal)
-        lower_bound, upper_bound = y_cal.min(), y_cal.max()
-        # compute error
+        lower_bound, upper_bound = y_cal.min(), y_cal.max()  # bounds are obtained from this set
+        # compute CRPS
         avg_crps, counter = 0, 0
-        for ind, x in enumerate(X_test):
+        for ind, x in enumerate(X_test):  # one element at a time
             prediction = predict_torch(model, x[None])
-            predicted_cdf = partial(method.__class__.predict_cdf, method, prediction.squeeze())
-            avg_crps = avg_crps * (counter / (counter+1)) + crps_single_prediction(predicted_cdf, y_test[ind], lower_bound, upper_bound) / (counter+1)
+            predicted_cdf = method.get_cdf_func(prediction.squeeze())
+            avg_crps = avg_crps * (counter / (counter + 1)) + crps_single_prediction(
+                predicted_cdf, y_test[ind], lower_bound, upper_bound
+            ) / (counter + 1)
             counter += 1
-            print(f'sample {ind}/{len(X_test)}, avg_crps={avg_crps}', end='\r')
-        print('Final CRPS:', avg_crps)
+            print(f"sample {ind}/{len(X_test)}, avg_crps={avg_crps}", end="\r")
+        print("Final CRPS:", avg_crps)
+        print("<" * 80)
 
 
+# manage command line interface
 if __name__ == "__main__":
-    from fire import Fire
-
-    Fire(main)
-    # cProfile.run("main()", sort="cumtime", filename="probabilistic.profile")
+    # if --profile is passed then launch cprofile
+    if "--profile" in sys.argv:
+        sys.argv.remove("--profile")
+        if Path("probabilistic.profile").exists():
+            os.remove("main.profile")
+        cProfile.run("main()", sort="cumtime", filename="main.profile")
+    else:
+        # fire will make the command line interface based on the function signature
+        Fire(main)
