@@ -53,8 +53,7 @@ def main(
         print(">" * 80)
         print("running method {}".format(method_name))
         # get method
-        method_class = methods[method_name]
-        method = method_class()  # defines the output_dim, loss_fn, distribution prediction, etc.
+        method = methods[method_name]()  # defines the output_dim, loss_fn, distribution prediction, etc.
         # get model
         model = MLP(output_dim=method.get_mlp_output_dim())
         # train model
@@ -97,7 +96,6 @@ def main(
 if __name__ == "__main__":
     # if --profile is passed then launch cprofile
     if "--profile" in sys.argv:
-        sys.argv.remove("--profile")
         if Path("probabilistic.profile").exists():
             os.remove("main.profile")
         cProfile.run("main()", sort="cumtime", filename="main.profile")
