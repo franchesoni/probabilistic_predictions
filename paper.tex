@@ -1,0 +1,139 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{amsmath, amsfonts, amssymb}
+
+\title{Probabilistic regression losses for deep learning}
+\author{franchesoni}
+\date{February 2024}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+In the realm of statistical and machine learning models, regression tasks traditionally involve predicting a continuous variable, such as temperature or brightness, from a set of input features. However, deterministic predictions that provide single-point estimates often fail to capture the inherent uncertainty in real-world phenomena. Probabilistic regression, which predicts a distribution over possible outcomes rather than a single value, offers a richer, more informative approach, particularly for applications like solar forecasting where understanding uncertainty is crucial. This paper explores the integration of deep learning techniques with probabilistic regression, focusing on differentiable cost functions that enable effective training of such models. Through detailed analysis and synthetic experiments in both one-dimensional and two-dimensional spaces, we demonstrate the versatility and performance of these approaches in capturing complex, uncertain relationships in data.
+\end{abstract}
+
+
+\section{Introduction}
+Probabilistic regression represents a significant advancement over traditional deterministic approaches by providing a comprehensive picture of possible outcomes and their probabilities. This is particularly relevant in fields such as financial forecasting, climate modeling, and healthcare, where making decisions under uncertainty is the norm. The ability to quantify uncertainty in predictions allows for more informed decision-making and risk management.
+
+The objectives of this work are:
+\begin{enumerate}
+    \item To elucidate the importance of probabilistic regression in capturing the uncertainty inherent in real-world data and its advantages over deterministic forecasting.
+    \item To introduce and discuss various metrics for evaluating the performance of probabilistic regression models, emphasizing their role in model assessment and selection.
+    \item To explore differentiable loss functions that facilitate the training of deep learning models for probabilistic regression, highlighting their theoretical foundations and practical implementations.
+    \item To assess the efficacy of these loss functions through experiments on synthetic data, designed to represent complex distributions in both one-dimensional and two-dimensional domains.
+\end{enumerate}
+
+
+\section{Background}
+Probabilistic regression seeks to model the conditional distribution $p(y|x)$ of a continuous outcome variable $y$, given an input vector $x$. Unlike deterministic regression, which outputs a single point estimate $\hat{y} = f(x)$, probabilistic regression provides a full distribution that reflects the uncertainty and variability of the outcome. This approach leverages the cumulative distribution function (CDF), $F(y|x) = P(Y \leq y|x)$, a monotonically increasing function that maps any real-valued outcome $y$ to a probability $\alpha$ in the unit interval $[0, 1]$. The CDF's utility lies in its ability to derive quantiles, including the median and interquartile range, offering a richer understanding of the predicted outcome distribution.
+
+Mathematically, the CDF and its derivative, the probability density function (PDF), are defined as follows:
+\begin{equation}
+    F(y|x) = P(Y \leq y|x), \quad f(y|x) = \frac{d}{dy}F(y|x) \approx \frac{F(y+h|x) - F(y|x)}{h}
+\end{equation}
+where $h$ is a small step size, facilitating the approximation of the PDF from the CDF.
+
+\section{Metrics for Evaluating Probabilistic Regression}
+\subsection{Log Score}
+The \textbf{Log Score} provides a measure of the predictive accuracy of a probabilistic model, penalizing both overconfident and underconfident predictions. Defined as the negative logarithm of the PDF evaluated at the observed value, the Log Score encourages models to assign high probability density to the true outcomes. It is a proper scoring rule, ensuring that the expected score is optimized when the model's predicted distribution matches the true distribution of the data.
+\begin{equation}
+    LS(x, y) = -\log(f(y|x))
+\end{equation}
+
+\subsection{Continuous Ranked Probability Score}
+The \textbf{Continuous Ranked Probability Score} extends the concept of scoring rules to the entire predicted distribution, measuring the integrated squared difference between the predicted CDF and a step function centered at the observed value. It captures both the accuracy and sharpness of probabilistic predictions, rewarding models that provide both precise and calibrated probability distributions.
+\begin{equation}
+    CRPS(x, y) = \int_{-\infty}^{\infty} (F(y'|x) - \mathrm{1}_{y \leq y'})^2 dy'
+\end{equation}
+
+\subsection{Calibration and Sharpness}
+Calibration refers to the alignment between predicted probabilities and observed frequencies, a critical aspect of probabilistic models' reliability. Sharpness, on the other hand, pertains to the concentration of predictive distributions, with sharper predictions indicating higher confidence. Together, these metrics offer a holistic view of a model's performance, balancing the precision of probability estimates with their accuracy and reliability.
+
+Calibration, within the framework of probabilistic regression, measures the consonance between predicted probability distributions for outcomes and the actual outcomes observed. A probabilistic regression model achieves good calibration when, for every predicted probability $p$, the frequency of the actual outcome falling within a specified predictive interval or quantile consistently aligns with $p$. This principle is pivotal for ensuring the reliability of the model's uncertainty quantification, and it is particularly elucidated through practical examples like prediction intervals or quantile predictions.
+
+Given a model that generates a cumulative distribution function $CDF_x$ for each input $x$, one can ascertain the cumulative probability of the target $y$, denoted as $CDF_x(y) = \alpha$, where $P(Y \leq y|x) = \alpha$. Applying this procedure across each data pair $(x_i, y_i)$ yields a collection of pairs $(\alpha_i, y_i)$. These pairs serve as the basis for calculating various calibration metrics and generating insightful plots, as discussed below:
+
+\subsubsection{PIT Histogram}
+The Probability Integral Transform (PIT) histogram is a crucial diagnostic tool for evaluating model calibration. By plotting a histogram of the $\alpha_i$ values, one anticipates a uniform distribution if the model is perfectly calibrated. This uniformity signifies that the model's predicted probabilities accurately reflect the empirical distribution of outcomes. Mathematically, the PIT is expressed as $PIT(\alpha_i) = \alpha_i$, and the uniformity of the resulting histogram is assessed against the ideal of a flat, uniform distribution, indicating optimal calibration. It's a consequence of the Probability Integral Transform theorem, which states that if $Y$ is a continuous random variable with cumulative distribution function $F_Y$, and if $U= F_Y(Y)$, then $U$ follows a uniform distribution on the interval $[0,1]$. 
+
+
+\subsubsection{Calibration Plot}
+Calibration plots offer a visual method to assess the calibration of probabilistic predictions. In these plots, the predicted cumulative probabilities $\alpha$ are plotted on the x-axis against the empirical cumulative distribution on the y-axis. The ideal scenario is depicted by the identity line $y = x$, where the predicted probabilities perfectly match the observed frequencies. Deviations from this line indicate areas where the model is either overconfident or underconfident in its predictions.
+
+\subsubsection{Expected Calibration Error (ECE)}
+The Expected Calibration Error provides a quantitative measure of a model's calibration by computing the mean absolute deviation between the predicted probabilities and the observed frequencies. For each probability prediction $\alpha_i$, the calibration error is calculated as $|\alpha_i - \frac{1}{n}\sum_{j} \mathrm{1}_{y_j \leq y_i}|$, where $n$ is the total number of observations. The ECE is then the average of these individual calibration errors across all predictions, offering a concise metric that summarizes the overall calibration of the model. This metric essentially quantifies the mean absolute error between the calibration plot and the identity line, serving as a critical indicator of the model's calibration quality.
+
+
+\section{Differentiable Losses for Probabilistic Regression}
+To effectively train deep learning models on probabilistic regression tasks, we utilize differentiable loss functions that directly optimize the model parameters based on the discrepancies between predicted distributions and observed data. These loss functions are designed to be computationally tractable and conducive to gradient-based optimization, facilitating the integration of probabilistic forecasting into the deep learning framework.
+
+All models predict parameters that characterize a CDF. They differ on how these parameters are computed and how the CDF is defined. 
+
+\subsection{Probabilistic deterministic regression}
+When training with the MSE or the MAE loss, the model learns to predict the mean or the median of the target distribution respectively. We can form a predicted distribution by considering this point estimate and using it to parameterize a Gaussian or Laplace distribution. The other parameters of the distribution are fit to the training data, and are simply the square root of the MSE (the standard deviation of the Gaussian) or the MAE (the scale of the Laplace distribution).
+
+\subsubsection{M1: Mean Squared Error}
+Use the MSE as a loss. After training, compute the square root of the MSE. This is the standard deviation of the Gaussian distribution whose mean the model is predicting. 
+\begin{equation}
+    MSE(x, y) = (y - \hat{y})^2
+\end{equation}
+
+\subsubsection{M2: Mean Absolute Error}
+Use the MAE as a loss. After training, compute the MAE. This is the scale of the Laplace distribution whose median the model is predicting.
+\begin{equation}
+    MAE(x, y) = |y - \hat{y}|
+\end{equation}
+
+\subsection{Likelihood-based losses}
+Instead of predicting the mean or median and then estimating the deviation or scale from the dataset, one can fit both center and width of the distributions simultaneously by using a likelihood-based loss. The model predicts the parameters of the distribution directly, and the loss is the negative log-likelihood of the observed data given the predicted distribution. This is a proper scoring rule, and it is the most direct way to train a probabilistic model.
+
+\subsubsection{M3: Gaussian Likelihood}
+Use as loss function:
+\begin{equation}
+    L(\mu, \sigma^2) = \frac{1}{2}\log(2\pi\sigma^2) + \frac{(y - \mu)^2}{2\sigma^2}
+\end{equation}
+and predict for each input $x$ the mean $\mu$ and the variance $\sigma^2$ of a Gaussian distribution.
+Pytorch has a built-in function to compute this loss.
+
+\subsubsection{M4: Laplace Likelihood}
+Use as loss function:
+\begin{equation}
+    L(\mu, b) = \log(2b) + \frac{|y - \mu|}{b}
+\end{equation}  
+
+\subsection{M5: Quantile regression}
+Quantile regression is a form of probabilistic regression that directly predicts quantiles of the target distribution. The loss function is the pinball loss, which is the negative log-likelihood of the observed data given the predicted quantile. This is a proper scoring rule, and it is the most direct way to train a probabilistic model. Use as losses:
+\begin{equation}
+    L_q(\tau) = (\tau - \mathrm{1}_{y \leq \hat{y}})(y - \hat{y})
+\end{equation}
+where $\tau$ is the quantile level, and $\mathrm{1}_{y \leq \hat{y}}$ is the indicator function that is 1 if $y \leq \hat{y}$ and 0 otherwise. For instance, if we predict $3$ outputs, we can set $\tau = 0.25, 0.5, 0.75$ to predict the first, second and third quartiles of the target distribution. The quantiles define the bins of the predicted distribution, and the mass is asigned proportionally to each bin's width.  
+
+\subsection{M6: Classification with cross-entropy loss}
+An approach used by some works, is to discretize the target distribution and predict the probability of each bin. This is a form of probabilistic regression, and the cross-entropy loss is used. The bins can be defined by the quantiles of the target distribution, or by any other method. This is the standard classification loss in deep learning. Unfortunately, it doesn't take into account the fact that the bins are ordered. 
+
+\subsection{M7: Implicit quantile regression}
+Introduced in the paper ``Implicit Quantile Networks for Distributional Reinforcement Learning'', this loss leverages some properties of the quantile functions to allow for a better approximation of the quantiles. Assume the network $\psi : \mathcal{X} \to \mathrm{R}^d$ maps the input $x$ to some features $\psi(x)$, and some other layers $f: \mathrm{R}^d \to \mathrm{R}$ map the features to an output value. An additional function $\phi : [0,1] \to \mathrm{R}^d$ embeds the sampled quantiles $\tau$ into the feature space. Then we have that the estimated value is:
+\begin{equation}
+    \hat y = f(\psi(x) \cdot \phi(\tau))
+\end{equation}
+with $\phi_j(\tau) = \text{ReLU}\left(\sum_{i=0}^{n-1} \cos(\pi i \tau) w_{ij} + b_j\right)$, where $n=64$, and $w_{ij}$ and $b_j$ are the parameters of the function $\phi$. The coordinate $j$ indexes each one of the $d$ dimensions.
+The loss in the paper is the Huber quantile regression loss, but we simplify it to the quantile regression loss. One samples $N$ quantiles $\tau_1, \dots, \tau_N$ from a uniform distribution, and the loss is:
+\begin{equation}
+    L(x, y) = \frac{1}{N} \sum_{i=1}^N (\tau_i - \mathrm{1}_{y \leq \hat y (\tau_i)})(y - \hat{y}_i(\tau_i))
+\end{equation}
+
+
+
+\section{Experiments}
+We conduct experiments on synthetic datasets designed to simulate challenging scenarios in both one-dimensional and two-dimensional spaces. These experiments demonstrate the capability of deep learning models, trained with the proposed differentiable loss functions, to accurately capture and predict complex probabilistic distributions. The results underscore the potential of combining deep learning with probabilistic regression to address a wide range of predictive tasks characterized by uncertainty and variability.
+
+\section{Conclusion}
+This work underscores the importance of probabilistic regression in modern predictive modeling, offering a pathway to more nuanced and informative predictions. Through the development and evaluation of differentiable loss functions, we pave the way for the broader adoption of probabilistic approaches in deep learning, with promising implications for various applications that require robust uncertainty quantification.
+
+
+
+
+\end{document}
