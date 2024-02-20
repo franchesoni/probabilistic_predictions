@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from torch import nn
 import torch
 from scipy.integrate import quad
+import gc
 
 
 def generate_data(N, mixture_factors, mean1, mean2, std1, std2):
@@ -78,9 +79,13 @@ class Regressor(ABC):
     def loss_fn(self, predicted_params, y_target):
         pass
 
-    @staticmethod
     @abstractmethod
-    def cdf(predicted_params, extra_params, points_to_evaluate):
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        pass
+
+    @property
+    @abstractmethod
+    def name(self):
         pass
 
 
@@ -101,8 +106,8 @@ class MeanRegressor(Regressor):
             (predicted_params - y_target) ** 2
         )  # Mean squared error which is equivalent to the variance
 
-    @staticmethod
     def cdf(
+        self,
         predicted_params: torch.Tensor,
         extra_params: dict,
         points_to_evaluate: torch.Tensor,
@@ -111,51 +116,179 @@ class MeanRegressor(Regressor):
         dist = torch.distributions.Normal(predicted_params, extra_params["std"])
         return dist.cdf(points_to_evaluate)  # output shape (B, N)
 
+    @property
+    def name(self):
+        return "Mean Regressor"
 
-# class MedianRegressor:
-#     def __init__(self):
-#         self.mlp = SimpleMLP()
-#         self.b = None
 
-#     def fit(self, X, y, n_epochs=1):
-#         self.mlp = fit_torch(self.mlp, X, y, self.loss_fn, n_epochs=n_epochs)
-#         with torch.no_grad():
-#             self.b = torch.median(torch.abs(self.mlp(X) - torch.from_numpy(y)))
-#         return self
+class MedianRegressor(Regressor):
+    def __init__(self):
+        self.mlp = SimpleMLP()
+        self.b = None
 
-#     def loss_fn(self, predicted_params, y_target):
-#         return torch.mean(torch.abs(predicted_params- y_target))
+    def compute_extra_params(self, X, y):
+        with torch.no_grad():
+            b = torch.median(torch.abs(self.mlp(X) - torch.from_numpy(y)))
+        return {"b": b}
 
-#     def predict_cdf(self, x):
-#         self.mlp.eval()
-#         with torch.no_grad():
-#             predicted_params = self.mlp(x[None])
-#             dist = torch.distributions.Laplace(predicted_params, self.b)
-#         def cdf_func(point_to_evaluate):
-#             return dist.cdf(torch.Tensor([point_to_evaluate])).item()
-#         return cdf_func, predicted_params - 5 * self.b, predicted_params + 5 * self.b
+    def loss_fn(self, predicted_params, y_target):
+        return torch.mean(torch.abs(predicted_params - y_target))
 
-# class MeanStdRegressor:
-#     def __init__(self):
-#         self.mlp = SimpleMLP(output_size=2)
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        dist = torch.distributions.Laplace(predicted_params, extra_params["b"])
+        return dist.cdf(points_to_evaluate)
 
-#     def fit(self, X, y, n_epochs=1):
-#         self.mlp = fit_torch(self.mlp, X, y, self.loss_fn, n_epochs=n_epochs)
-#         return self
+    @property
+    def name(self):
+        return "Median Regressor"
 
-#     def loss_fn(self, predicted_params, y_target):
-#         mu, sigma2 = predicted_params[:, 0], torch.nn.functional.softplus(predicted_params[:, 1])
-#         return 0.5 * (torch.log(2 * torch.pi * sigma2) + (mu - y_target) ** 2 / sigma2)
 
-#     def predict_cdf(self, x):
-#         self.mlp.eval()
-#         with torch.no_grad():
-#             predicted_params = self.mlp(x[None])
-#             mu, sigma2 = predicted_params[:, 0], torch.nn.functional.softplus(predicted_params[:, 1])
-#             dist = torch.distributions.Normal(predicted_params[:, 0], torch.sqrt(predicted_params[:, 1]))
-#         def cdf_func(point_to_evaluate):
-#             return dist.cdf(torch.Tensor([point_to_evaluate])).item()
-#         return cdf_func, mu - torch.sqrt(sigma2) * 3.5, mu + torch.sqrt(sigma2) * 3.5
+class MeanStdRegressor(Regressor):
+    def __init__(self):
+        self.mlp = SimpleMLP(output_size=2)
+
+    def loss_fn(self, predicted_params, y_target):
+        mu, sigma2 = predicted_params[:, 0:1], torch.nn.functional.softplus(
+            predicted_params[:, 1:2]
+        )
+        return (
+            0.5 * (torch.log(2 * torch.pi * sigma2) + (mu - y_target) ** 2 / sigma2)
+        ).mean()
+
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        mu, sigma2 = predicted_params[:, 0:1], torch.nn.functional.softplus(
+            predicted_params[:, 1:2]
+        )
+        dist = torch.distributions.Normal(mu, torch.sqrt(sigma2))
+        return dist.cdf(points_to_evaluate)
+
+    @property
+    def name(self):
+        return "MeanStd Regressor"
+
+
+class QuantileRegressor(Regressor):
+    def __init__(self, n_quantiles=10):
+        self.mlp = SimpleMLP(output_size=n_quantiles + 1)
+        self.n_quantiles = n_quantiles
+        self.taus = torch.linspace(0, 1, self.n_quantiles + 1)  # (nq+1)
+
+    def loss_fn(self, predicted_params, y_target):
+        loss = (
+            (
+                (self.taus[None] - 1 * (y_target <= predicted_params))
+                * (y_target - predicted_params)
+            )
+            .sum(dim=1)
+            .mean()
+        )
+        return loss
+
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        # (B, nq+1), None, (N)
+        B, nq, N = (
+            predicted_params.shape[0],
+            predicted_params.shape[1] - 1,
+            points_to_evaluate.shape[0],
+        )
+        distances = torch.diff(predicted_params, dim=1).reshape(B, nq, 1)  # (B, nq, 1)
+        relus = torch.nn.functional.relu(
+            points_to_evaluate.reshape(1, 1, N) - predicted_params.reshape(B, nq + 1, 1)
+        )  # (B, nq+1, N)  memory-intense
+        ramps_up = relus[:, :-1]  # (B, nq, N)
+        ramps_down = relus[:, 1:]  # (B, nq, N)
+        return (((ramps_up - ramps_down) / distances) / self.n_quantiles).sum(
+            dim=1
+        )  # (B, N)  memory-intense
+
+    @property
+    def name(self):
+        return "Quantile Regressor"
+
+class ImplicitNetwork(nn.Module):
+    def __init__(self, d=32, n=64):
+        super(ImplicitNetwork, self).__init__()
+        self.d, self.n = d, n
+        self.encoder = SimpleMLP(output_size=d)  # feature extractor
+        self.mlp2 = SimpleMLP(input_size=d, output_size=1, hidden_sizes=[d,d])
+        self.embedding_projector = nn.Linear(n, d)
+
+    def embed(self, taus):
+        # taus (T)
+        cosemb = torch.cos(torch.pi * torch.arange(self.n)[None] * taus.reshape(-1, 1))  # (T, n)
+        emb_taus = torch.nn.functional.relu(self.embedding_projector(cosemb))  # (T, d)
+        return emb_taus
+    
+    def forward(self, x):
+        return self.encoder(x)  # (B, d)
+
+    def forward2(self, x, taus):
+        # (B, F), (T)
+        B, F, T = x.shape[0], x.shape[1], taus.shape[0]
+        xf = self.encoder(x)  # (B, d)
+        emb_taus = self.embed(taus)  # (T, d)
+        feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, T, self.d)  # (B, T, d)
+        preds = self.mlp2(feats)  # (B, T, 1)
+        return preds
+
+class ImplicitQuantileRegressor(Regressor):
+    def __init__(self, d=32, n=64, N=8):
+        self.d = d  # feature dimension
+        self.n = n  # cosine embedding dimension
+        self.N = N  # samples to use at the loss
+        self.mlp = ImplicitNetwork(d=d, n=n)  # call it mlp for compatibility
+
+    def loss_fn(self, predicted_params, y_target):
+        # predicted params (B, d)
+        random_taus = torch.rand(self.N)
+        B, N = predicted_params.shape[0], random_taus.shape[0]
+        xf = predicted_params  # (B, d)
+        emb_taus = self.mlp.embed(random_taus)  # (N, d)
+        feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, N, self.d)  # (B, N, d)
+        preds = self.mlp.mlp2(feats.reshape(B*N, self.d)).reshape(B,N)  # (B, N)
+        loss = (  # quantile loss
+            (
+                (random_taus[None] - 1 * (y_target <= preds))
+                * (y_target - preds)
+            )  # (B, N)
+            .sum(dim=1)
+            .mean()
+        )
+        return loss
+
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        P = len(points_to_evaluate)
+        many_taus = torch.linspace(0, 1, min(100, P))
+        B, N = predicted_params.shape[0], many_taus.shape[0]
+        xf = predicted_params  # (B, d)
+        emb_taus = self.mlp.embed(many_taus)  # (N, d)
+        feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, N, self.d)  # (B, N, d)
+        preds = self.mlp.mlp2(feats.reshape(B*N, self.d)).reshape(B, N)  # (B, N)
+        is_higher = preds.reshape(B, N, 1) >= points_to_evaluate.reshape(1, 1, P)  # (B, N, P) see if the predicted are higher than the points to evaluate
+        is_lower = ~is_higher  # (B, N, P)
+        preds_higher_masked = torch.where(is_higher, preds.reshape(B, N, 1), preds.max() + 1)  # (B, N, P) keep those points that are higher at their original value
+        preds_lower_masked = torch.where(is_lower, preds.reshape(B, N, 1), preds.min() - 1)  # (B, N, P)
+        nearest_higher = preds_higher_masked.min(dim=1).values  # (B, P)  the nearest higher value for each point
+        nearest_lower = preds_lower_masked.max(dim=1).values  # (B, P)
+        higher_indices = (preds.reshape(B, N, 1) == nearest_higher.reshape(B, 1, P)).max(dim=1).indices  # (B, P)  the indices of the nearest higher value
+        lower_indices = (preds.reshape(B, N, 1) == nearest_lower.reshape(B, 1, P)).max(dim=1).indices  # (B, P)
+        taus_higher = many_taus[higher_indices.reshape(B*P)].reshape(B,P)
+        taus_lower = many_taus[lower_indices.reshape(B*P)].reshape(B,P)
+        # linear interpolation
+        weight = (points_to_evaluate.reshape(1,P) - nearest_lower) / (nearest_higher - nearest_lower)  # (B, P)
+        interpolated_probs = taus_lower + weight * (taus_higher - taus_lower)  # (B, P)
+        del many_taus, is_higher, is_lower, preds_higher_masked, preds_lower_masked, nearest_higher, nearest_lower, higher_indices, lower_indices, taus_higher, taus_lower, weight
+        gc.collect()
+        return interpolated_probs
+
+    @property
+    def name(self):
+        return "Implicit Quantile Regressor"
+
+
+ 
+
+
 
 # class MedianScaleRegressor:
 #     def __init__(self):
@@ -178,34 +311,6 @@ class MeanRegressor(Regressor):
 #         def cdf_func(point_to_evaluate):
 #             return dist.cdf(torch.Tensor([point_to_evaluate])).item()
 #         return cdf_func, median - 5 * scale, median + 5 * scale
-
-# class QuantileRegressor:
-#     def __init__(self, n_quantiles=4):
-#         self.mlp = SimpleMLP(output_size=n_quantiles+1)
-#         self.n_quantiles = n_quantiles
-#         self.taus = torch.linspace(0, 1, self.n_quantiles+1)  # (nq+1)
-
-#     def fit(self, X, y, n_epochs=1):
-#         self.mlp = fit_torch(self.mlp, X, y, self.loss_fn, n_epochs=n_epochs)
-#         return self
-
-#     def loss_fn(self, predicted_params, y_target):
-#         assert predicted_params.shape[0] == 1 and predicted_params.shape[1] == len(self.taus)
-#         loss = ((self.taus[None] - (predicted_params <= y_target)) *
-#                 (y_target - predicted_params)).mean()
-#         return loss
-
-#     def predict_cdf(self, x):
-#         self.mlp.eval()
-#         with torch.no_grad():
-#             predicted_params = self.mlp(x[None])
-#             distances = torch.diff(predicted_params)
-#         def cdf_func(point_to_evaluate):
-#             relus = torch.nn.functional.relu(point_to_evaluate - predicted_params)  # nq+1
-#             ramps_up = relus[:-1]  # nq
-#             ramps_down = - relus[1:]  # nq
-#             return (((ramps_up + ramps_down) / distances) / self.n_quantiles).sum()
-#         return cdf_func
 
 
 def fit_torch(
@@ -253,6 +358,9 @@ def fit_torch(
                 optimizer.zero_grad()
                 predicted_params = model(X_batch)
                 loss = loss_fn(predicted_params, y_batch)
+                if torch.isnan(loss).any():
+                    print('LOSS IS NAN, please  debug')
+                    breakpoint()
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
@@ -304,16 +412,22 @@ def batch_crps(
     return crpss
 
 
-def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4)):
-    # prediction
-    pred_params, extra_params = reg.predict(Xtest)
+def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4), plot=False, batch_size=128):
     points_to_evaluate = torch.linspace(
         lower, upper, n_bins
     )  # evaluate cdf at these points
-    cum_probs = reg.cdf(
-        pred_params, extra_params, points_to_evaluate
-    )  # B, n_bins  # cumulative probability at each point
-    # aux variables
+    # prediction
+    cum_probs = []
+    for i in tqdm.tqdm(range(0, len(Xtest), batch_size)):
+        Xbatch = Xtest[i: i + batch_size]
+        pred_params, extra_params = reg.predict(Xbatch)
+        cum_probs_batch = reg.cdf(
+            pred_params, extra_params, points_to_evaluate
+        )  # B, n_bins  # cumulative probability at each point
+        del pred_params, extra_params, Xbatch
+        gc.collect()
+        cum_probs.append(cum_probs_batch)
+    cum_probs = torch.cat(cum_probs, dim=0)
     median_indices = torch.argmin(
         torch.abs(cum_probs - 0.5), dim=1
     )  # the indices of the median
@@ -335,55 +449,100 @@ def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4)):
         torch.argsort(cum_probs_at_y) / len(cum_probs_at_y) - cum_probs_at_y
     ).mean()
     centering_error = (cum_probs_at_y - 0.5).abs().mean()
-    print(f"Calibration error: {calibration_error.item():.3e}")
+    mae = torch.abs(median_deterministic_predictions - ytest).mean()
+    print("-" * 40)
     print(f"CRP error: {crpes.mean().item():.3e}")
+    print(f"Calibration error: {calibration_error.item():.3e}")
     print(f"Centering error: {centering_error.item():.3e}")
+    print(f"MAE of the median predictor: {mae.item():.3e}")
+    print("-" * 40)
 
-    plt.figure()
+    if plot:
+        plt.figure()
 
-    plt.subplot(211)  # PIT hist
-    plt.hist(cum_probs_at_y, bins=20, density=True, label="Empirical")
-    plt.plot(np.linspace(0, 1, 101), np.ones(101), "k--", label="Ideal")
-    plt.legend()
-    plt.xlabel("Assigned cumulative probability")
-    plt.ylabel("Empirical Density")
+        plt.subplot(211)  # PIT hist
+        plt.hist(cum_probs_at_y, bins=20, density=True, label="Empirical")
+        plt.plot(np.linspace(0, 1, 101), np.ones(101), "k--", label="Ideal")
+        plt.legend()
+        plt.xlabel("Assigned cumulative probability")
+        plt.ylabel("Empirical Density")
 
-    plt.subplot(212)  # reliability diagram
-    xticks = torch.linspace(0, 1, 101)
-    plt.plot(
-        xticks,
-        (xticks[:, None] >= cum_probs_at_y[None]).sum(dim=1) / len(cum_probs_at_y),
-        label="Empirical",
-    )
-    plt.plot(np.linspace(0, 1, 101), np.linspace(0, 1, 101), "k--", label="Ideal")
-    plt.legend()
-    plt.xlabel("Assigned cumulative probability")
-    plt.ylabel("Empirical cumulative probability")
+        plt.subplot(212)  # reliability diagram
+        xticks = torch.linspace(0, 1, 101)
+        plt.plot(
+            xticks,
+            (xticks[:, None] >= cum_probs_at_y[None]).sum(dim=1) / len(cum_probs_at_y),
+            label="Empirical",
+        )
+        plt.plot(np.linspace(0, 1, 101), np.linspace(0, 1, 101), "k--", label="Ideal")
+        plt.legend()
+        plt.xlabel("Assigned cumulative probability")
+        plt.ylabel("Empirical cumulative probability")
 
-    plt.tight_layout()
-    plt.show()
+        plt.tight_layout()
+        plt.show()
 
     return {
         "crpes": crpes,
         "calibration_error": calibration_error,
         "centering_error": centering_error,
+        "mae": mae,
     }
 
 
 # %%
-SEED = 0
-N = 10000
-mean1, mean2, std1, std2 = 0, 1, 1.1, 0.1
-mixture_factors = np.linspace(0, 1, 10)
-# %%
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-X, y = generate_data(N, mixture_factors, mean1, mean2, std1, std2)
-Xtest, ytest = generate_data(1000, mixture_factors, mean1, mean2, std1, std2)
-# %%
-reg = MeanRegressor()
-n_epochs = 4
-reg = reg.fit(X, y, n_epochs=n_epochs)
-metrics = evaluate(reg, Xtest, ytest)
+if __name__ == "__main__":
+    SEED = 0
+    N = 10000
+    mean1, mean2, std1, std2 = 0, 1, 1.1, 0.1
+    mixture_factors = np.linspace(0, 1, 10)
+    # %%
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    X, y = generate_data(N, mixture_factors, mean1, mean2, std1, std2)
+    Xtest, ytest = generate_data(1000, mixture_factors, mean1, mean2, std1, std2)
+    # %%
+    n_epochs = 4
+    for reg in [
+        MeanRegressor(),
+        MedianRegressor(),
+        MeanStdRegressor(),
+        QuantileRegressor(),
+        ImplicitQuantileRegressor(),
+    ][-1:]:
+        print(f"Training {reg.name}")
+        reg = reg.fit(X, y, n_epochs=n_epochs)
+        print(f"Evaluating {reg.name}")
+        metrics = evaluate(reg, Xtest, ytest)
 
-# %%
+    # %%
+# Evaluating Mean Regressor
+# ----------------------------------------
+# CRP error: 8.223e-01
+# Calibration error: 2.600e-01
+# Centering error: 3.214e-01
+# MAE of the median predictor: 1.280e+00
+# ----------------------------------------
+
+# Evaluating Median Regressor
+# ----------------------------------------
+# CRP error: 7.123e-01
+# Calibration error: 3.021e-01
+# Centering error: 3.926e-01
+# MAE of the median predictor: 1.041e+00
+# ----------------------------------------
+
+# Evaluating MeanStd Regressor
+# ----------------------------------------
+# CRP error: 1.790e+00
+# Calibration error: 2.577e-01
+# Centering error: 3.756e-01
+# MAE of the median predictor: 4.302e+00
+
+# Evaluating Quantile Regressor
+# ----------------------------------------
+# CRP error: 8.900e-01
+# Calibration error: 2.243e-01
+# Centering error: 2.903e-01
+# MAE of the median predictor: 1.276e+00
+# ----------------------------------------
