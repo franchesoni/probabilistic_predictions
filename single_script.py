@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 from torch import nn
 import torch
 from scipy.integrate import quad
-import gc
 
 
 def generate_data(N, mixture_factors, mean1, mean2, std1, std2):
@@ -210,7 +209,7 @@ class ImplicitNetwork(nn.Module):
         super(ImplicitNetwork, self).__init__()
         self.d, self.n = d, n
         self.encoder = SimpleMLP(output_size=d)  # feature extractor
-        self.mlp2 = SimpleMLP(input_size=d, output_size=1, hidden_sizes=[d,d])
+        self.mlp2 = SimpleMLP(input_size=d, output_size=1, hidden_sizes=[4*d]*3)
         self.embedding_projector = nn.Linear(n, d)
 
     def embed(self, taus):
@@ -240,6 +239,7 @@ class ImplicitQuantileRegressor(Regressor):
 
     def loss_fn(self, predicted_params, y_target):
         # predicted params (B, d)
+        self.mlp.train()
         random_taus = torch.rand(self.N)
         B, N = predicted_params.shape[0], random_taus.shape[0]
         xf = predicted_params  # (B, d)
@@ -257,37 +257,74 @@ class ImplicitQuantileRegressor(Regressor):
         return loss
 
     def cdf(self, predicted_params, extra_params, points_to_evaluate):
-        P = len(points_to_evaluate)
-        many_taus = torch.linspace(0, 1, min(100, P))
-        B, N = predicted_params.shape[0], many_taus.shape[0]
-        xf = predicted_params  # (B, d)
-        emb_taus = self.mlp.embed(many_taus)  # (N, d)
-        feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, N, self.d)  # (B, N, d)
-        preds = self.mlp.mlp2(feats.reshape(B*N, self.d)).reshape(B, N)  # (B, N)
-        is_higher = preds.reshape(B, N, 1) >= points_to_evaluate.reshape(1, 1, P)  # (B, N, P) see if the predicted are higher than the points to evaluate
-        is_lower = ~is_higher  # (B, N, P)
-        preds_higher_masked = torch.where(is_higher, preds.reshape(B, N, 1), preds.max() + 1)  # (B, N, P) keep those points that are higher at their original value
-        preds_lower_masked = torch.where(is_lower, preds.reshape(B, N, 1), preds.min() - 1)  # (B, N, P)
-        nearest_higher = preds_higher_masked.min(dim=1).values  # (B, P)  the nearest higher value for each point
-        nearest_lower = preds_lower_masked.max(dim=1).values  # (B, P)
-        higher_indices = (preds.reshape(B, N, 1) == nearest_higher.reshape(B, 1, P)).max(dim=1).indices  # (B, P)  the indices of the nearest higher value
-        lower_indices = (preds.reshape(B, N, 1) == nearest_lower.reshape(B, 1, P)).max(dim=1).indices  # (B, P)
-        taus_higher = many_taus[higher_indices.reshape(B*P)].reshape(B,P)
-        taus_lower = many_taus[lower_indices.reshape(B*P)].reshape(B,P)
-        # linear interpolation
-        weight = (points_to_evaluate.reshape(1,P) - nearest_lower) / (nearest_higher - nearest_lower)  # (B, P)
-        interpolated_probs = taus_lower + weight * (taus_higher - taus_lower)  # (B, P)
-        del many_taus, is_higher, is_lower, preds_higher_masked, preds_lower_masked, nearest_higher, nearest_lower, higher_indices, lower_indices, taus_higher, taus_lower, weight
-        gc.collect()
+        self.mlp.eval()
+        with torch.no_grad():
+            P = len(points_to_evaluate)
+            many_taus = torch.linspace(0, 1, min(100, P))
+            B, N = predicted_params.shape[0], many_taus.shape[0]
+            xf = predicted_params  # (B, d)
+            emb_taus = self.mlp.embed(many_taus)  # (N, d)
+            feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, N, self.d)  # (B, N, d)
+            preds = self.mlp.mlp2(feats.reshape(B*N, self.d)).reshape(B, N)  # (B, N)
+            preds = torch.sort(preds, dim=1).values  # (B, N)  order to make monotonically increasing, it's an smoothing
+            is_higher = preds.reshape(B, N, 1) >= points_to_evaluate.reshape(1, 1, P)  # (B, N, P) see if the predicted are higher than the points to evaluate
+            is_lower = ~is_higher  # (B, N, P)
+            preds_higher_masked = torch.where(is_higher, preds.reshape(B, N, 1), preds.max() + 1)  # (B, N, P) keep those points that are higher at their original value
+            preds_lower_masked = torch.where(is_lower, preds.reshape(B, N, 1), preds.min() - 1)  # (B, N, P)
+            nearest_higher = preds_higher_masked.min(dim=1).values  # (B, P)  the nearest higher value for each point
+            nearest_lower = preds_lower_masked.max(dim=1).values  # (B, P)
+            higher_indices = (preds.reshape(B, N, 1) == nearest_higher.reshape(B, 1, P)).max(dim=1).indices  # (B, P)  the indices of the nearest higher value
+            lower_indices = (preds.reshape(B, N, 1) == nearest_lower.reshape(B, 1, P)).max(dim=1).indices  # (B, P)
+            taus_higher = many_taus[higher_indices.reshape(B*P)].reshape(B,P)
+            taus_lower = many_taus[lower_indices.reshape(B*P)].reshape(B,P)
+            # linear interpolation
+            weight = (points_to_evaluate.reshape(1,P) - nearest_lower) / (nearest_higher - nearest_lower)  # (B, P)
+            interpolated_probs = taus_lower + weight * (taus_higher - taus_lower)  # (B, P)
         return interpolated_probs
 
     @property
     def name(self):
         return "Implicit Quantile Regressor"
 
+class BinClassifierRegressor(Regressor):
+    def __init__(self, n_bins=20, lower=-5, upper=5):
+        self.n_bins = n_bins
+        self.lower = lower
+        self.upper = upper
+        self.mlp = SimpleMLP(output_size=n_bins)
+        self.bin_edges = torch.linspace(lower, upper, n_bins + 1)
+        self.distance = (self.bin_edges[1] - self.bin_edges[0])
 
- 
+    def loss_fn(self, predicted_params, y_target):
+        # y_target (B, 1)
+        # cum_one_hot = 1 * (y_target >= self.bin_edges[None, :-1])  # (B, n_bins)
+        assert self.bin_edges[0] <= y_target.min() and y_target.max() <= self.bin_edges[-1], f"y_target out of bounds: {y_target.min()} {y_target.max()}, redefine lower and upper"
+        bin_indices = (torch.bucketize(y_target, self.bin_edges, right=True) - 1).clamp(max=self.n_bins-1)  # (B, 1)
+        one_hot_encoded = torch.zeros(len(y_target), self.n_bins).scatter(1, bin_indices, 1)  # (B, n_bins)
+        return torch.nn.functional.cross_entropy(predicted_params, one_hot_encoded, reduction='mean')
 
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        B, n_bins = predicted_params.shape
+        probs = predicted_params.softmax(dim=1)
+        cum_probs = probs.cumsum(dim=1)
+        
+        points_to_evaluate_as_bin_inds = ((points_to_evaluate - self.lower) / self.distance).floor().long()  # Ensure integer indices
+        reminders = (points_to_evaluate - self.lower) % self.distance
+        
+        cumprob_until_prev_bin = torch.cat([torch.zeros(B, 1), cum_probs], dim=1).gather(1, points_to_evaluate_as_bin_inds)
+        excess_of_current_bin = probs.gather(1, points_to_evaluate_as_bin_inds) * reminders  # Adjusted for broadcasting
+        cumprobs = cumprob_until_prev_bin + excess_of_current_bin
+        
+        return cumprobs
+
+
+
+        
+
+
+    @property
+    def name(self):
+        return "Bin Classifier Regressor"
 
 
 # class MedianScaleRegressor:
@@ -358,9 +395,6 @@ def fit_torch(
                 optimizer.zero_grad()
                 predicted_params = model(X_batch)
                 loss = loss_fn(predicted_params, y_batch)
-                if torch.isnan(loss).any():
-                    print('LOSS IS NAN, please  debug')
-                    breakpoint()
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
@@ -377,27 +411,6 @@ def fit_torch(
                         )
     return model
 
-
-def crps_single_prediction(
-    predicted_cdf, ground_truth, lower_bound, upper_bound, eps=1e-03
-):
-    """
-    Compute the CRPS for a single prediction.
-
-    :param predicted_cdf: Function that computes the predicted CDF at a given point.
-    :param ground_truth: The observed ground truth value.
-    :param lower_bound: Lower bound for integration.
-    :param upper_bound: Upper bound for integration.
-    :return: CRPS for the given prediction.
-    """
-
-    def integrand(x):
-        return (predicted_cdf(x) - 1 * (x >= ground_truth)) ** 2
-
-    crps, _ = quad(
-        integrand, lower_bound, upper_bound, epsabs=eps, epsrel=eps, limit=15
-    )
-    return crps
 
 
 def batch_crps(
@@ -424,8 +437,6 @@ def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4), plot=False
         cum_probs_batch = reg.cdf(
             pred_params, extra_params, points_to_evaluate
         )  # B, n_bins  # cumulative probability at each point
-        del pred_params, extra_params, Xbatch
-        gc.collect()
         cum_probs.append(cum_probs_batch)
     cum_probs = torch.cat(cum_probs, dim=0)
     median_indices = torch.argmin(
@@ -502,13 +513,14 @@ if __name__ == "__main__":
     X, y = generate_data(N, mixture_factors, mean1, mean2, std1, std2)
     Xtest, ytest = generate_data(1000, mixture_factors, mean1, mean2, std1, std2)
     # %%
-    n_epochs = 4
+    n_epochs = 14
     for reg in [
         MeanRegressor(),
         MedianRegressor(),
         MeanStdRegressor(),
         QuantileRegressor(),
         ImplicitQuantileRegressor(),
+        BinClassifierRegressor(),
     ][-1:]:
         print(f"Training {reg.name}")
         reg = reg.fit(X, y, n_epochs=n_epochs)
