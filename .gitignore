@@ -8,5 +8,6 @@ runs/
 *.png
 *.fls
 *.log
+*.out
 # *.pdf
 *.gz
