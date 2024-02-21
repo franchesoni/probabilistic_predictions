@@ -95,6 +95,7 @@ CRPS is the most expressive metric for probabilistic regression as it captures b
 Calibration refers to the alignment between predicted probabilities and observed frequencies, a critical aspect of probabilistic models' reliability. Sharpness, on the other hand, pertains to the concentration of predictive distributions, with sharper predictions indicating higher confidence. Together, these metrics offer a holistic view of a model's performance, balancing the precision of probability estimates with their accuracy and reliability.
 
 A probabilistic regression model achieves good calibration when, for every predicted probability $p$, the frequency of the actual outcome falling within a specified predictive interval or quantile consistently aligns with $p$. This principle is pivotal for ensuring the reliability of the model's uncertainty quantification, and it is particularly elucidated through practical examples like prediction intervals or quantile predictions.
+Calibration must be assessed and potentially improved using techniques such as isotonic regression or Platt scaling.
 
 Given a model that generates a cumulative distribution function $F_x$ for each input $x$, one can ascertain the cumulative probability of the target $y$, denoted as $\text{CDF}_x(y) = P(Y \leq y|x) = \alpha$. Applying this procedure across each data pair $(x_i, y_i)$ yields a collection of pairs $(\alpha_i, y_i)$. These pairs serve as the basis for calculating various calibration metrics and generating insightful plots, as discussed below:
 
@@ -275,5 +276,3 @@ This work underscores the importance of probabilistic regression in modern predi
 
 
 \end{document}
-
-% Calibration must be assessed and potentially improved using techniques such as isotonic regression or Platt scaling.
