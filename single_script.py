@@ -408,7 +408,7 @@ def fit_torch(
     batch_size=16384,
     lr=1e-1,
     n_epochs=24,
-    optim="sgd",
+    optim="adamw",
     extra_metrics={},
     extra_metrics_every=1,
     extra_datalimit=100,
@@ -536,7 +536,7 @@ def evaluate(
         xticks = torch.linspace(0, 1, 101)
         plt.plot(
             xticks,
-            (xticks[:, None] >= cum_probs_at_y[None]).sum(dim=1) / len(cum_probs_at_y),
+            (cum_probs_at_y[None] <= xticks[:, None]).sum(dim=1) / len(cum_probs_at_y),
             label="Empirical",
         )
         plt.plot(np.linspace(0, 1, 101), np.linspace(0, 1, 101), "k--", label="Ideal")
