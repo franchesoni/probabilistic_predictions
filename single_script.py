@@ -1,12 +1,13 @@
 # %%
 """Probabilistic regression in 1D"""
+import time
+from pathlib import Path
 import numpy as np
 import tqdm
 from scipy.stats import norm
 import matplotlib.pyplot as plt
 from torch import nn
 import torch
-from scipy.integrate import quad
 
 
 def generate_data(N, mixture_factors, mean1, mean2, std1, std2):
@@ -166,6 +167,28 @@ class MeanStdRegressor(Regressor):
         return "MeanStd Regressor"
 
 
+class MedianScaleRegressor(Regressor):
+    def __init__(self):
+        self.mlp = SimpleMLP(output_size=2)
+
+    def loss_fn(self, predicted_params, y_target):
+        median, scale = predicted_params[:, 0:1], torch.nn.functional.softplus(
+            predicted_params[:, 1:2]
+        )
+        return (torch.log(2 * scale) + torch.abs(median - y_target) / scale).mean()
+
+    def cdf(self, predicted_params, extra_params, points_to_evaluate):
+        median, scale = predicted_params[:, 0:1], torch.nn.functional.softplus(
+            predicted_params[:, 1:2]
+        )
+        dist = torch.distributions.Laplace(median, scale)
+        return dist.cdf(points_to_evaluate)
+
+    @property
+    def name(self):
+        return "MedianScale Regressor"
+
+
 class QuantileRegressor(Regressor):
     def __init__(self, n_quantiles=10):
         self.mlp = SimpleMLP(output_size=n_quantiles + 1)
@@ -204,20 +227,23 @@ class QuantileRegressor(Regressor):
     def name(self):
         return "Quantile Regressor"
 
+
 class ImplicitNetwork(nn.Module):
     def __init__(self, d=32, n=64):
         super(ImplicitNetwork, self).__init__()
         self.d, self.n = d, n
         self.encoder = SimpleMLP(output_size=d)  # feature extractor
-        self.mlp2 = SimpleMLP(input_size=d, output_size=1, hidden_sizes=[4*d]*3)
+        self.mlp2 = SimpleMLP(input_size=d, output_size=1, hidden_sizes=[4 * d] * 3)
         self.embedding_projector = nn.Linear(n, d)
 
     def embed(self, taus):
         # taus (T)
-        cosemb = torch.cos(torch.pi * torch.arange(self.n)[None] * taus.reshape(-1, 1))  # (T, n)
+        cosemb = torch.cos(
+            torch.pi * torch.arange(self.n)[None] * taus.reshape(-1, 1)
+        )  # (T, n)
         emb_taus = torch.nn.functional.relu(self.embedding_projector(cosemb))  # (T, d)
         return emb_taus
-    
+
     def forward(self, x):
         return self.encoder(x)  # (B, d)
 
@@ -229,6 +255,7 @@ class ImplicitNetwork(nn.Module):
         feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, T, self.d)  # (B, T, d)
         preds = self.mlp2(feats)  # (B, T, 1)
         return preds
+
 
 class ImplicitQuantileRegressor(Regressor):
     def __init__(self, d=32, n=64, N=8):
@@ -245,11 +272,10 @@ class ImplicitQuantileRegressor(Regressor):
         xf = predicted_params  # (B, d)
         emb_taus = self.mlp.embed(random_taus)  # (N, d)
         feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, N, self.d)  # (B, N, d)
-        preds = self.mlp.mlp2(feats.reshape(B*N, self.d)).reshape(B,N)  # (B, N)
+        preds = self.mlp.mlp2(feats.reshape(B * N, self.d)).reshape(B, N)  # (B, N)
         loss = (  # quantile loss
             (
-                (random_taus[None] - 1 * (y_target <= preds))
-                * (y_target - preds)
+                (random_taus[None] - 1 * (y_target <= preds)) * (y_target - preds)
             )  # (B, N)
             .sum(dim=1)
             .mean()
@@ -264,90 +290,114 @@ class ImplicitQuantileRegressor(Regressor):
             B, N = predicted_params.shape[0], many_taus.shape[0]
             xf = predicted_params  # (B, d)
             emb_taus = self.mlp.embed(many_taus)  # (N, d)
-            feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(1, N, self.d)  # (B, N, d)
-            preds = self.mlp.mlp2(feats.reshape(B*N, self.d)).reshape(B, N)  # (B, N)
-            preds = torch.sort(preds, dim=1).values  # (B, N)  order to make monotonically increasing, it's an smoothing
-            is_higher = preds.reshape(B, N, 1) >= points_to_evaluate.reshape(1, 1, P)  # (B, N, P) see if the predicted are higher than the points to evaluate
+            feats = xf.reshape(B, 1, self.d) * emb_taus.reshape(
+                1, N, self.d
+            )  # (B, N, d)
+            preds = self.mlp.mlp2(feats.reshape(B * N, self.d)).reshape(B, N)  # (B, N)
+            preds = torch.sort(
+                preds, dim=1
+            ).values  # (B, N)  order to make monotonically increasing, it's an smoothing
+            is_higher = preds.reshape(B, N, 1) >= points_to_evaluate.reshape(
+                1, 1, P
+            )  # (B, N, P) see if the predicted are higher than the points to evaluate
             is_lower = ~is_higher  # (B, N, P)
-            preds_higher_masked = torch.where(is_higher, preds.reshape(B, N, 1), preds.max() + 1)  # (B, N, P) keep those points that are higher at their original value
-            preds_lower_masked = torch.where(is_lower, preds.reshape(B, N, 1), preds.min() - 1)  # (B, N, P)
-            nearest_higher = preds_higher_masked.min(dim=1).values  # (B, P)  the nearest higher value for each point
+            preds_higher_masked = torch.where(
+                is_higher, preds.reshape(B, N, 1), preds.max() + 1
+            )  # (B, N, P) keep those points that are higher at their original value
+            preds_lower_masked = torch.where(
+                is_lower, preds.reshape(B, N, 1), preds.min() - 1
+            )  # (B, N, P)
+            nearest_higher = preds_higher_masked.min(
+                dim=1
+            ).values  # (B, P)  the nearest higher value for each point
             nearest_lower = preds_lower_masked.max(dim=1).values  # (B, P)
-            higher_indices = (preds.reshape(B, N, 1) == nearest_higher.reshape(B, 1, P)).max(dim=1).indices  # (B, P)  the indices of the nearest higher value
-            lower_indices = (preds.reshape(B, N, 1) == nearest_lower.reshape(B, 1, P)).max(dim=1).indices  # (B, P)
-            taus_higher = many_taus[higher_indices.reshape(B*P)].reshape(B,P)
-            taus_lower = many_taus[lower_indices.reshape(B*P)].reshape(B,P)
+            higher_indices = (
+                (preds.reshape(B, N, 1) == nearest_higher.reshape(B, 1, P))
+                .max(dim=1)
+                .indices
+            )  # (B, P)  the indices of the nearest higher value
+            lower_indices = (
+                (preds.reshape(B, N, 1) == nearest_lower.reshape(B, 1, P))
+                .max(dim=1)
+                .indices
+            )  # (B, P)
+            taus_higher = many_taus[higher_indices.reshape(B * P)].reshape(B, P)
+            taus_lower = many_taus[lower_indices.reshape(B * P)].reshape(B, P)
             # linear interpolation
-            weight = (points_to_evaluate.reshape(1,P) - nearest_lower) / (nearest_higher - nearest_lower)  # (B, P)
-            interpolated_probs = taus_lower + weight * (taus_higher - taus_lower)  # (B, P)
+            weight = (points_to_evaluate.reshape(1, P) - nearest_lower) / (
+                nearest_higher - nearest_lower
+            )  # (B, P)
+            interpolated_probs = taus_lower + weight * (
+                taus_higher - taus_lower
+            )  # (B, P)
         return interpolated_probs
 
     @property
     def name(self):
         return "Implicit Quantile Regressor"
 
+
 class BinClassifierRegressor(Regressor):
-    def __init__(self, n_bins=20, lower=-5, upper=5):
+    def __init__(self, n_bins=20, lower=-6, upper=6):
         self.n_bins = n_bins
         self.lower = lower
         self.upper = upper
         self.mlp = SimpleMLP(output_size=n_bins)
-        self.bin_edges = torch.linspace(lower, upper, n_bins + 1)
-        self.distance = (self.bin_edges[1] - self.bin_edges[0])
+        self.bin_edges = torch.cat(
+            [
+                -torch.tensor([torch.inf]),
+                torch.linspace(lower, upper, n_bins - 1),
+                torch.tensor([torch.inf]),
+            ]
+        )
+        self.distance = self.bin_edges[2] - self.bin_edges[1]
 
     def loss_fn(self, predicted_params, y_target):
         # y_target (B, 1)
         # cum_one_hot = 1 * (y_target >= self.bin_edges[None, :-1])  # (B, n_bins)
-        assert self.bin_edges[0] <= y_target.min() and y_target.max() <= self.bin_edges[-1], f"y_target out of bounds: {y_target.min()} {y_target.max()}, redefine lower and upper"
-        bin_indices = (torch.bucketize(y_target, self.bin_edges, right=True) - 1).clamp(max=self.n_bins-1)  # (B, 1)
-        one_hot_encoded = torch.zeros(len(y_target), self.n_bins).scatter(1, bin_indices, 1)  # (B, n_bins)
-        return torch.nn.functional.cross_entropy(predicted_params, one_hot_encoded, reduction='mean')
+        assert (
+            self.bin_edges[0] <= y_target.min() and y_target.max() <= self.bin_edges[-1]
+        ), f"y_target out of bounds: {y_target.min()} {y_target.max()}, redefine lower and upper"
+        bin_indices = (
+            torch.bucketize(y_target, self.bin_edges, right=True) - 1
+        )  # (B, 1)
+        one_hot_encoded = torch.zeros(len(y_target), self.n_bins).scatter(
+            1, bin_indices, 1
+        )  # (B, n_bins)
+        return torch.nn.functional.cross_entropy(
+            predicted_params, one_hot_encoded, reduction="mean"
+        )
 
     def cdf(self, predicted_params, extra_params, points_to_evaluate):
         B, n_bins = predicted_params.shape
         probs = predicted_params.softmax(dim=1)
         cum_probs = probs.cumsum(dim=1)
-        
-        points_to_evaluate_as_bin_inds = ((points_to_evaluate - self.lower) / self.distance).floor().long()  # Ensure integer indices
-        reminders = (points_to_evaluate - self.lower) % self.distance
-        
-        cumprob_until_prev_bin = torch.cat([torch.zeros(B, 1), cum_probs], dim=1).gather(1, points_to_evaluate_as_bin_inds)
-        excess_of_current_bin = probs.gather(1, points_to_evaluate_as_bin_inds) * reminders  # Adjusted for broadcasting
+
+        points_to_evaluate_as_bin_inds = torch.clamp(
+            ((points_to_evaluate - self.lower) / self.distance).floor() + 1,
+            min=0,
+            max=n_bins - 1,
+        ).long()  # Ensure integer indices
+        remainders = (
+            (torch.clamp(points_to_evaluate, max=self.upper) - self.lower)
+            % self.distance
+        ) * (points_to_evaluate >= self.lower) + (
+            points_to_evaluate < self.lower
+        ) * 1  # (P)
+
+        cumprob_until_prev_bin = torch.cat([torch.zeros((B, 1)), cum_probs], dim=1)[
+            :, points_to_evaluate_as_bin_inds
+        ]
+        excess_of_current_bin = (
+            probs[:, points_to_evaluate_as_bin_inds] * remainders[None]
+        )  # Adjusted for broadcasting
         cumprobs = cumprob_until_prev_bin + excess_of_current_bin
-        
+
         return cumprobs
-
-
-
-        
-
 
     @property
     def name(self):
         return "Bin Classifier Regressor"
-
-
-# class MedianScaleRegressor:
-#     def __init__(self):
-#         self.mlp = SimpleMLP(output_size=2)
-
-#     def fit(self, X, y, n_epochs=1):
-#         self.mlp = fit_torch(self.mlp, X, y, self.loss_fn, n_epochs=n_epochs)
-#         return self
-
-#     def loss_fn(self, predicted_params, y_target):
-#         median, scale = predicted_params[:, 0], torch.nn.functional.softplus(predicted_params[:, 1])
-#         return torch.log(2 * scale) + torch.abs(median - y_target) / scale
-
-#     def predict_cdf(self, x):
-#         self.mlp.eval()
-#         with torch.no_grad():
-#             predicted_params = self.mlp(x[None])
-#             median, scale = predicted_params[:, 0], torch.nn.functional.softplus(predicted_params[:, 1])
-#             dist = torch.distributions.Laplace(median, scale)
-#         def cdf_func(point_to_evaluate):
-#             return dist.cdf(torch.Tensor([point_to_evaluate])).item()
-#         return cdf_func, median - 5 * scale, median + 5 * scale
 
 
 def fit_torch(
@@ -359,7 +409,6 @@ def fit_torch(
     lr=1e-1,
     n_epochs=24,
     optim="sgd",
-    verbose=True,
     extra_metrics={},
     extra_metrics_every=1,
     extra_datalimit=100,
@@ -412,7 +461,6 @@ def fit_torch(
     return model
 
 
-
 def batch_crps(
     points_to_evaluate, cum_probs, y, lower_bound, upper_bound, n_bins=int(1e4)
 ):
@@ -425,14 +473,16 @@ def batch_crps(
     return crpss
 
 
-def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4), plot=False, batch_size=128):
+def evaluate(
+    reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4), plot_to="", batch_size=128
+):
     points_to_evaluate = torch.linspace(
         lower, upper, n_bins
     )  # evaluate cdf at these points
     # prediction
     cum_probs = []
     for i in tqdm.tqdm(range(0, len(Xtest), batch_size)):
-        Xbatch = Xtest[i: i + batch_size]
+        Xbatch = Xtest[i : i + batch_size]
         pred_params, extra_params = reg.predict(Xbatch)
         cum_probs_batch = reg.cdf(
             pred_params, extra_params, points_to_evaluate
@@ -461,14 +511,18 @@ def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4), plot=False
     ).mean()
     centering_error = (cum_probs_at_y - 0.5).abs().mean()
     mae = torch.abs(median_deterministic_predictions - ytest).mean()
-    print("-" * 40)
-    print(f"CRP error: {crpes.mean().item():.3e}")
-    print(f"Calibration error: {calibration_error.item():.3e}")
-    print(f"Centering error: {centering_error.item():.3e}")
-    print(f"MAE of the median predictor: {mae.item():.3e}")
-    print("-" * 40)
+    string = "\n".join(
+        [
+            ("-" * 40),
+            (f"CRP error: {crpes.mean().item():.3e}"),
+            (f"Calibration error: {calibration_error.item():.3e}"),
+            (f"Centering error: {centering_error.item():.3e}"),
+            (f"MAE of the median predictor: {mae.item():.3e}"),
+            ("-" * 40),
+        ]
+    )
 
-    if plot:
+    if plot_to:
         plt.figure()
 
         plt.subplot(211)  # PIT hist
@@ -491,70 +545,70 @@ def evaluate(reg, Xtest, ytest, lower=-15, upper=15, n_bins=int(1e4), plot=False
         plt.ylabel("Empirical cumulative probability")
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(plot_to)
+        plt.close()
 
-    return {
-        "crpes": crpes,
-        "calibration_error": calibration_error,
-        "centering_error": centering_error,
-        "mae": mae,
-    }
+    print(string)
+    return string
+    # return {
+    #     "crpes": crpes,
+    #     "calibration_error": calibration_error,
+    #     "centering_error": centering_error,
+    #     "mae": mae,
+    # }
 
 
 # %%
-if __name__ == "__main__":
-    SEED = 0
-    N = 10000
-    mean1, mean2, std1, std2 = 0, 1, 1.1, 0.1
-    mixture_factors = np.linspace(0, 1, 10)
+def main(
+    SEED=0,
+    N=10000,
+    N_test=100,
+    mean1=0,
+    mean2=1,
+    std1=1.1,
+    std2=0.1,
+    n_epochs=144,
+    n_factors=10,
+    postfix="",
+):
+    args = locals()
+    mixture_factors = np.linspace(0, 1, n_factors)
     # %%
     np.random.seed(SEED)
     torch.manual_seed(SEED)
     X, y = generate_data(N, mixture_factors, mean1, mean2, std1, std2)
-    Xtest, ytest = generate_data(1000, mixture_factors, mean1, mean2, std1, std2)
+    Xtest, ytest = generate_data(N_test, mixture_factors, mean1, mean2, std1, std2)
+    Path("runs").mkdir(exist_ok=True, parents=True)
     # %%
-    n_epochs = 14
     for reg in [
         MeanRegressor(),
         MedianRegressor(),
         MeanStdRegressor(),
+        MedianScaleRegressor(),
+        BinClassifierRegressor(),
         QuantileRegressor(),
         ImplicitQuantileRegressor(),
-        BinClassifierRegressor(),
-    ][-1:]:
+    ]:
         print(f"Training {reg.name}")
+        st = time.time()
         reg = reg.fit(X, y, n_epochs=n_epochs)
+        train_time = time.time() - st
+        print(f"Training took {train_time:.2f} seconds")
         print(f"Evaluating {reg.name}")
-        metrics = evaluate(reg, Xtest, ytest)
+        st = time.time()
+        string = evaluate(reg, Xtest, ytest, plot_to=f"runs/{reg.name+postfix}.png")
+        eval_time = time.time() - st
+        with open(f"runs/{reg.name+postfix}.txt", "w") as f:
+            f.write(f"args = {args}" + "\n")
+            f.write(f"-" * 50 + "\n")
+            f.write(f"{reg.name}" + "\n")
+            f.write(f"Training took {train_time} seconds" + "\n")
+            f.write(f"Evaluating took {eval_time} seconds" + "\n")
+            f.write(string + "\n")
+        print(f"Evaluating took {eval_time} seconds")
 
-    # %%
-# Evaluating Mean Regressor
-# ----------------------------------------
-# CRP error: 8.223e-01
-# Calibration error: 2.600e-01
-# Centering error: 3.214e-01
-# MAE of the median predictor: 1.280e+00
-# ----------------------------------------
 
-# Evaluating Median Regressor
-# ----------------------------------------
-# CRP error: 7.123e-01
-# Calibration error: 3.021e-01
-# Centering error: 3.926e-01
-# MAE of the median predictor: 1.041e+00
-# ----------------------------------------
+if __name__ == "__main__":
+    from fire import Fire
 
-# Evaluating MeanStd Regressor
-# ----------------------------------------
-# CRP error: 1.790e+00
-# Calibration error: 2.577e-01
-# Centering error: 3.756e-01
-# MAE of the median predictor: 4.302e+00
-
-# Evaluating Quantile Regressor
-# ----------------------------------------
-# CRP error: 8.900e-01
-# Calibration error: 2.243e-01
-# Centering error: 2.903e-01
-# MAE of the median predictor: 1.276e+00
-# ----------------------------------------
+    Fire(main)

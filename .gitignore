@@ -2,3 +2,10 @@
 *.profile
 __pycache__/
 *.pyc
+runs/
+*.aux
+*.latexmk
+*.fls
+*.log
+*.pdf
+*.gz
