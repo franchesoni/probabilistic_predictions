@@ -4,8 +4,9 @@ __pycache__/
 *.pyc
 runs/
 *.aux
-*.latexmk
+*latexmk
+*.png
 *.fls
 *.log
-*.pdf
+# *.pdf
 *.gz
