@@ -86,6 +86,7 @@ class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
         super(LaplaceGlobalWidth, self).__init__()
         self.model = MLP(layer_sizes + [1], **kwargs)
         self.global_width = torch.tensor([1.0])
+        self.train_width = train_width
         if train_width:
             self.global_width = nn.Parameter(self.global_width)
 
@@ -319,6 +320,21 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         return self.model(batch_x)
 
 
+def get_method(method_name):
+    if method_name == "laplacescore":
+        return LaplaceLogScore
+    elif method_name == "laplacewb":
+        return LaplaceGlobalWidth
+    elif method_name == "mdn":
+        return MixtureDensityNetwork
+    elif method_name == "ce":
+        return CategoricalCrossEntropy
+    elif method_name == "pinball":
+        return PinballLoss
+    else:
+        raise ValueError(f"Unknown method name {method_name}")
+
+
 def test_laplace():
     torch.autograd.set_detect_anomaly(True)
     for fixed_pred_params, method in [
@@ -438,4 +454,5 @@ def test_all():
     test_categorical_cross_entropy()
 
 
-test_all()
+if __name__ == "__main__":
+    test_all()
