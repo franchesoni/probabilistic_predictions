@@ -16,12 +16,9 @@ class MLP(nn.Module):
             if i < len(layer_sizes) - 2:
                 layers.append(activation_fn())
         self.network = nn.Sequential(*layers)
-        self.norm_layer = (
-            nn.Softmax(dim=1) if layer_sizes[-1] > 1 else nn.Identity()
-        )  # softmax for prob distro
 
     def forward(self, x):
-        return self.norm_layer(self.network(x))
+        return self.network(x)
 
 
 class ProbabilisticMethod(ABC):
@@ -55,13 +52,13 @@ class LaplaceLogScore(ProbabilisticMethod, nn.Module):
         self.model = MLP(layer_sizes + [2], **kwargs)
 
     def get_F_at_y(self, batch_y, pred_params):
-        mus, bs = pred_params[:, 0], pred_params[:, 1]
+        mus, bs = pred_params[:, 0:1], pred_params[:, 1:]
         return 0.5 + 0.5 * (2 * (mus < batch_y) - 1) * (
             1 - torch.exp(-torch.abs(mus - batch_y) / bs)
         )
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        mus, bs = pred_params[:, 0], pred_params[:, 1]
+        mus, bs = pred_params[:, 0:1], pred_params[:, 1:]
         return torch.log(2 * bs) + torch.abs(mus - batch_y) / bs
 
     def loss(self, batch_y, pred_params):
@@ -99,6 +96,7 @@ class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
 
     def get_logscore_at_y(self, batch_y, pred_params):
         mus, bs = pred_params, self.global_width
+        assert bs > 0, "Width must be positive"
         return torch.log(2 * bs) + torch.abs(mus - batch_y) / bs
 
     def loss(self, batch_y, pred_params):
