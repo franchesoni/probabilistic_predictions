@@ -1,5 +1,7 @@
 import torch
 from numpy import mean
+import time
+from pathlib import Path
 import schedulefree
 import matplotlib.pyplot as plt
 
@@ -23,15 +25,24 @@ def main(
     hidden_layers=2,
     lr=1e-2,
     seed=0,
+    tag="",
 ):
-    print(locals())
+    # logging
+    tag = "_" + tag if tag else ""
+    fulltag = f"{method_name}_{dataset_name}{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    dstdir = Path(f"runs/{fulltag}")
+    dstdir.mkdir(parents=True, exist_ok=True)
+    str_to_log = str(locals())
+    # data
     trainds = get_dataset(dataset_name, n_samples=10000, seed=0)
     valds = get_dataset(dataset_name, n_samples=1000, seed=1)
     traindl = torch.utils.data.DataLoader(trainds, batch_size=batch_size, shuffle=True)
     valdl = torch.utils.data.DataLoader(valds, batch_size=batch_size, shuffle=False)
 
     torch.manual_seed(seed)
-    model = get_method(method_name)([trainds.get_feature_dim(), *([hidden_dim] * hidden_layers)], **method_kwargs).to(DEVICE)
+    model = get_method(method_name)(
+        [trainds.get_feature_dim(), *([hidden_dim] * hidden_layers)], **method_kwargs
+    ).to(DEVICE)
     optimizer = schedulefree.AdamWScheduleFree(
         model.parameters(), lr=lr, warmup_steps=int(steps * 0.05)
     )
@@ -70,16 +81,18 @@ def main(
             target = target.view(target.shape[0], -1)
             pred = model(feat_vec)
             val_losses.append(model.loss(target, pred))
-        print(f"Validation Loss: {mean(val_losses)}")
+        meanvalloss = mean(val_losses)
+        print(f"Validation Loss: {meanvalloss}")
+        str_to_log += f"\nValidation Loss: {meanvalloss}"
     if hasattr(model, "global_width") and not model.train_width:
-        model.global_width.data = torch.tensor([mean(val_losses)]).to(DEVICE)
-
+        model.global_width.data = torch.tensor([meanvalloss]).to(DEVICE)
 
     plt.figure()
     plt.plot(loss_curve)
     plt.xlabel("Step")
     plt.ylabel("Loss")
-
+    plt.title("Training Loss")
+    plt.savefig(dstdir / "loss_curve.png")
 
     # Generate a grid of y values for the PDF
     y_min = 0
@@ -87,11 +100,10 @@ def main(
     y_grid = torch.linspace(y_min, y_max, 1000).view(1, -1).to(DEVICE)
     x_vis = torch.linspace(-0.1, 1.1, 1000).view(-1, 1).to(DEVICE)
 
-
     # Calculate the Laplace PDF values for the grid
     with torch.no_grad():
         params = model(x_vis)
-        energy = model.get_logscore_at_y(y_grid, params)
+        energy = model.get_logscore_at_y(y_grid.expand(x_vis.shape[0], -1), params)
     # mu = y_vis.view(-1, 1)  # Median from the predictions
     # pdf_values = (1 / (2 * b)) * torch.exp(-torch.abs(y_grid - mu) / b)
 
@@ -99,25 +111,30 @@ def main(
     x_vis_np = x_vis.view(-1).cpu().numpy()
     y_grid_np = y_grid.view(-1).cpu().numpy()
     pdf_values_np = torch.exp(-energy).cpu().numpy()
+    for cbar_values, cbar_name in [
+        (pdf_values_np, "PDF"),
+        (energy.cpu().numpy(), "Energy"),
+    ]:
+        plt.figure(figsize=(10, 6))
+        plt.scatter(trainds.X.cpu().numpy(), trainds.Y.cpu().numpy(), s=1, label="Data")
+        plt.pcolormesh(
+            x_vis_np,
+            y_grid_np,
+            cbar_values.T,
+            shading="auto",
+            cmap="viridis",
+            alpha=0.5,
+        )
 
-    # Plot the scatter plot and the model predictions
-    plt.figure(figsize=(10, 6))
-    plt.scatter(trainds.X.cpu().numpy(), trainds.Y.cpu().numpy(), s=1, label="Data")
-    # plt.plot(
-    #     x_vis_np, y_vis.view(-1).cpu().detach().numpy(), "r", label="Model Prediction"
-    # )
+        # Add labels and legend
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.colorbar(label=cbar_name)
+        plt.savefig(dstdir / f"{cbar_name}.png")
 
-    # Plot the PDF as a colored background
-    plt.pcolormesh(
-        x_vis_np, y_grid_np, pdf_values_np.T, shading="auto", cmap="viridis", alpha=0.5
-    )
-
-    # Add labels and legend
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.colorbar(label="PDF")
-    plt.legend()
-    plt.show()
+    # log
+    with open(dstdir / "log.txt", "w") as f:
+        f.write(str_to_log)
 
 
 from fire import Fire
