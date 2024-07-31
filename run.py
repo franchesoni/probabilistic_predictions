@@ -54,8 +54,8 @@ def main(
     while True:
         for x, y in traindl:
             x, y = x.to(DEVICE), y.to(DEVICE)
-            x = x.view(x.shape[0], -1)
-            y = y.view(y.shape[0], -1)
+            x = x.reshape(x.shape[0], -1)
+            y = y.reshape(y.shape[0], -1)
             optimizer.zero_grad()
             pred = model(x)
             loss = model.loss(y, pred)
@@ -77,8 +77,8 @@ def main(
     with torch.no_grad():
         for feat_vec, target in valdl:
             feat_vec, target = feat_vec.to(DEVICE), target.to(DEVICE)
-            feat_vec = feat_vec.view(feat_vec.shape[0], -1)
-            target = target.view(target.shape[0], -1)
+            feat_vec = feat_vec.reshape(feat_vec.shape[0], -1)
+            target = target.reshape(target.shape[0], -1)
             pred = model(feat_vec)
             val_losses.append(model.loss(target, pred))
         meanvalloss = mean(val_losses)
@@ -97,19 +97,19 @@ def main(
     # Generate a grid of y values for the PDF
     y_min = 0
     y_max = 1
-    y_grid = torch.linspace(y_min, y_max, 1000).view(1, -1).to(DEVICE)
-    x_vis = torch.linspace(-0.1, 1.1, 1000).view(-1, 1).to(DEVICE)
+    y_grid = torch.linspace(y_min, y_max, 1000).reshape(1, -1).to(DEVICE)
+    x_vis = torch.linspace(-0.1, 1.1, 1000).reshape(-1, 1).to(DEVICE)
 
     # Calculate the Laplace PDF values for the grid
     with torch.no_grad():
         params = model(x_vis)
-        energy = model.get_logscore_at_y(y_grid.expand(x_vis.shape[0], -1), params)
-    # mu = y_vis.view(-1, 1)  # Median from the predictions
+        energy = model.get_logscore_at_y(y_grid.expand(x_vis.shape[0], -1).contiguous(), params)
+    # mu = y_vis.reshape(-1, 1)  # Median from the predictions
     # pdf_values = (1 / (2 * b)) * torch.exp(-torch.abs(y_grid - mu) / b)
 
     # Convert to numpy for plotting
-    x_vis_np = x_vis.view(-1).cpu().numpy()
-    y_grid_np = y_grid.view(-1).cpu().numpy()
+    x_vis_np = x_vis.reshape(-1).cpu().numpy()
+    y_grid_np = y_grid.reshape(-1).cpu().numpy()
     pdf_values_np = torch.exp(-energy).cpu().numpy()
     for cbar_values, cbar_name in [
         (pdf_values_np, "PDF"),
@@ -123,7 +123,7 @@ def main(
             cbar_values.T,
             shading="auto",
             cmap="viridis",
-            alpha=0.5,
+            alpha=0.9,
         )
 
         # Add labels and legend
