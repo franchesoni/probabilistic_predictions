@@ -106,6 +106,14 @@ def main(
         energy = model.get_logscore_at_y(y_grid.expand(x_vis.shape[0], -1).contiguous(), params)
     # mu = y_vis.reshape(-1, 1)  # Median from the predictions
     # pdf_values = (1 / (2 * b)) * torch.exp(-torch.abs(y_grid - mu) / b)
+    plt.figure()
+    plt.scatter(trainds.X.cpu().numpy(), trainds.Y.cpu().numpy(), s=1, label="Data", color="black")
+    for i in range(params.shape[1]):
+        plt.plot(x_vis.cpu().numpy().reshape(-1), params[:, i].cpu().numpy(), label=f"Param {i}")
+    plt.legend()
+    plt.xlabel("X")
+    plt.ylabel("Params")
+    plt.savefig(dstdir / "Parameters.png")
 
     # Convert to numpy for plotting
     x_vis_np = x_vis.reshape(-1).cpu().numpy()
