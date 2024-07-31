@@ -31,7 +31,6 @@ def main(
     tag = "_" + tag if tag else ""
     fulltag = f"{method_name}_{dataset_name}{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
     dstdir = Path(f"runs/{fulltag}")
-    dstdir.mkdir(parents=True, exist_ok=True)
     str_to_log = str(locals())
     # data
     trainds = get_dataset(dataset_name, n_samples=10000, seed=0)
@@ -87,6 +86,8 @@ def main(
     if hasattr(model, "global_width") and not model.train_width:
         model.global_width.data = torch.tensor([meanvalloss]).to(DEVICE)
 
+    # figures and log
+    dstdir.mkdir(parents=True, exist_ok=True)
     plt.figure()
     plt.plot(loss_curve)
     plt.xlabel("Step")
