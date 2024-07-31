@@ -126,9 +126,13 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
             pred_params[:, 2 * self.n_components :],
         )
         assert pis.shape[0] == batch_y.shape[0]
-        assert len(batch_y.shape) == 2, f"batch_y.shape is {batch_y.shape} but should be (N, 1)"
+        assert (
+            len(batch_y.shape) == 2
+        ), f"batch_y.shape is {batch_y.shape} but should be (N, 1)"
         assert pis.shape[1] == self.n_components
-        batch_y = batch_y.reshape(batch_y.shape[0], 1)  # if this is not possible we need to change the code
+        batch_y = batch_y.reshape(
+            batch_y.shape[0], 1
+        )  # if this is not possible we need to change the code
         return (
             pis * 0.5 * (1 + torch.erf((batch_y - mus) / (sigmas * (2**0.5))))
         ).sum(dim=1)
@@ -141,7 +145,9 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
         )
         assert pis.shape[0] == batch_y.shape[0]
         assert pis.shape[1] == self.n_components
-        assert len(batch_y.shape) == 2, f"batch_y.shape is {batch_y.shape} but should be (N, 1)"
+        assert (
+            len(batch_y.shape) == 2
+        ), f"batch_y.shape is {batch_y.shape} but should be (N, 1)"
         batch_y = batch_y.unsqueeze(1)  # (B, 1, Y)
         pis, mus, sigmas = (
             pis.unsqueeze(2),
@@ -188,7 +194,12 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
 
     def get_F_at_y(self, batch_y, pred_params):
         bin_masses = pred_params
-        return get_F_at_y_PL(batch_y, all_quantiles=None, bin_masses=bin_masses, bin_borders=self.bin_borders.reshape(1, -1))
+        return get_F_at_y_PL(
+            batch_y,
+            cdf_at_borders=None,
+            bin_masses=bin_masses,
+            bin_borders=self.bin_borders.reshape(1, -1),
+        )
 
     def get_logscore_at_y(self, batch_y, pred_params):
         return get_logscore_at_y_PL(
@@ -237,7 +248,12 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
             ),
             dim=1,
         )
-        return get_F_at_y_PL(batch_y, all_quantiles=self.quantile_levels.reshape(1, -1), bin_masses=None, bin_borders=bin_borders)
+        return get_F_at_y_PL(
+            batch_y,
+            cdf_at_borders=self.quantile_levels.reshape(1, -1),
+            bin_masses=None,
+            bin_borders=bin_borders,
+        )
 
     def get_logscore_at_y(self, batch_y, pred_params):
         N = batch_y.shape[0]
@@ -268,6 +284,111 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
 
     def forward(self, batch_x):
         return self.model(batch_x)
+
+
+class HistogramCRPS(ProbabilisticMethod, nn.Module):
+    def __init__(self, layer_sizes, bin_borders, **kwargs):
+        """
+        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
+        It does not include the last layer.
+        """
+        super(HistogramCRPS, self).__init__()
+        self.B = len(bin_borders) - 1
+        self.bin_borders = torch.tensor(bin_borders)
+        self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
+        assert self.bin_widths.min() > 0, "Bin borders must be strictly increasing"
+        self.model = MLP(layer_sizes + [self.B], **kwargs)
+
+    def get_F_at_y(self, batch_y, pred_params):
+        bin_masses = pred_params
+        return get_F_at_y_PL(
+            batch_y,
+            cdf_at_borders=None,
+            bin_masses=bin_masses,
+            bin_borders=self.bin_borders.reshape(1, -1),
+        )
+
+    def get_logscore_at_y(self, batch_y, pred_params):
+        return get_logscore_at_y_PL(
+            batch_y,
+            all_quantiles=None,
+            bin_masses=pred_params,
+            bin_borders=self.bin_borders.reshape(1, -1),
+        )
+
+    def loss(self, batch_y, pred_params):
+        N, Y = batch_y.shape
+        assert pred_params.shape[0] in [1, N]
+        assert pred_params.shape[1] == self.B
+        bin_borders = self.bin_borders.reshape(1, -1)
+        bin_widths = self.bin_widths.reshape(1, -1)
+        cdf_at_borders = torch.cat(
+            (
+                torch.zeros((N, 1), device=batch_y.device),
+                torch.cumsum(pred_params, dim=1),
+            ),
+            dim=1,
+        )  # (N, B+1)
+
+        # Compute parts
+        parts = (
+            (cdf_at_borders[:, :-1] + cdf_at_borders[:, 1:]) / 2 * (bin_widths)
+        )  # (N, B)
+        sq_parts = (
+            -1
+            / 3
+            * (
+                cdf_at_borders[:, :-1] ** 2
+                + cdf_at_borders[:, :-1] * cdf_at_borders[:, 1:]
+                + cdf_at_borders[:, 1:] ** 2
+            )
+            * (-bin_widths)
+        )  # (N, B)
+
+        # first part of the loss
+        p1 = bin_borders[:, -1] - batch_y  # (N, Y)
+        # second part of the loss
+        p2 = torch.sum(sq_parts, dim=1)
+
+        # Find the bin index for each y
+        purek = torch.searchsorted(bin_borders, batch_y) - 1  # (N, Y)
+        k = torch.clamp(purek, 0, self.B - 1).squeeze()  # (N,) or (N, Y)
+
+        cdf_at_borderk = cdf_at_borders[torch.arange(N), k].view(N, -1)  # (N, Y)
+        cdf_at_borderkp1 = cdf_at_borders[torch.arange(N), k + 1].view(N, -1)  # (N, Y)
+        bin_widths_k = bin_widths[torch.arange(N), k].view(N, -1)  # (N, Y)
+        cdf_at_y = cdf_at_borderk + (
+            (
+                (batch_y - bin_borders[torch.arange(N), k].view(N, -1))  # (N, Y)
+                * (cdf_at_borderkp1 - cdf_at_borderk)
+                / (bin_widths_k + 1e-45)
+            )
+            * (1 * (0 < bin_widths_k))
+        )  # (N, Y)
+
+        p3 = (
+            (cdf_at_y + cdf_at_borderkp1)
+            / 2
+            * (bin_borders[torch.arange(N), k + 1].view(N, -1) - batch_y)
+        ) * ((bin_borders[:, 0] - batch_y < 0) * (batch_y < bin_borders[:, -1])).float()
+        mask = torch.arange(self.B, device=batch_y.device)[None, None, :] > purek.view(
+            N, Y, 1
+        )  # (N, Y, B)
+        p4 = torch.sum(parts.view(N, 1, self.B) * mask, dim=2) * (
+            (batch_y - bin_borders[:, -1] < 0)
+        )
+
+        crps = torch.abs(p1) + p2 - 2 * (p3 + p4)
+
+        return crps
+
+    def is_PL(self) -> bool:
+        return True
+
+    def forward(self, batch_x):
+        logits = self.model(batch_x)
+        masses = nn.functional.softmax(logits, dim=1)
+        return masses
 
 
 def get_logscore_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
@@ -301,22 +422,28 @@ def get_logscore_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
     return log_score
 
 
-def get_F_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
-    assert (bin_masses is None and all_quantiles is not None) or (
-        bin_masses is not None and all_quantiles is None
+def get_F_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
+    assert (bin_masses is None and cdf_at_borders is not None) or (
+        bin_masses is not None and cdf_at_borders is None
     )
     N, Y = batch_y.shape
-    assert (all_quantiles is None and bin_masses.shape[0] in [1, N]) or (
-        bin_masses is None and all_quantiles.shape[0] in [1, N]
+    assert (cdf_at_borders is None and bin_masses.shape[0] in [1, N]) or (
+        bin_masses is None and cdf_at_borders.shape[0] in [1, N]
     )
     assert bin_borders.shape[0] in [1, N]
     assert bin_borders.shape[1] == (
-        all_quantiles.shape[1] if all_quantiles is not None else bin_masses.shape[1] + 1
+        cdf_at_borders.shape[1]
+        if cdf_at_borders is not None
+        else bin_masses.shape[1] + 1
     )
-    B = all_quantiles.shape[1] - 1 if all_quantiles is not None else bin_masses.shape[1]
+    B = (
+        cdf_at_borders.shape[1] - 1
+        if cdf_at_borders is not None
+        else bin_masses.shape[1]
+    )
     # the F is in fact a linear interpolation of the cdf or the quantiles
-    if all_quantiles is None:
-        all_quantiles = torch.cat(
+    if cdf_at_borders is None:
+        cdf_at_borders = torch.cat(
             (
                 torch.zeros((N, 1), device=batch_y.device),
                 torch.cumsum(bin_masses, dim=1),
@@ -324,7 +451,7 @@ def get_F_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
             dim=1,
         )  # (N, B+1)
     else:
-        all_quantiles = all_quantiles.expand(N, B + 1)
+        cdf_at_borders = cdf_at_borders.expand(N, B + 1)
     bin_borders = bin_borders.expand(N, B + 1).contiguous()
     assert N > 1  # to ensure squeeze is irrelevant
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
@@ -333,13 +460,11 @@ def get_F_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
     k = torch.clamp(
         torch.searchsorted(bin_borders, batch_y) - 1, 0, B - 1
     ).squeeze()  # (N, Y) or (N,)
-    all_quantiles_k = all_quantiles[torch.arange(N), k].view(N, -1)  # (N, Y)
-    cdf_at_y =  all_quantiles_k + (
+    cdf_at_borderk = cdf_at_borders[torch.arange(N), k].view(N, -1)  # (N, Y)
+    cdf_at_y = cdf_at_borderk + (
         (
             (batch_y - bin_borders[torch.arange(N), k].view(N, -1))  # (N, Y)
-            * (all_quantiles[torch.arange(N), k+1].view(N, -1)
-                - all_quantiles_k
-            )
+            * (cdf_at_borders[torch.arange(N), k + 1].view(N, -1) - cdf_at_borderk)
             / (bin_widths[torch.arange(N), k].view(N, -1) + 1e-45)
         )
         * (1 * (0 < bin_widths[torch.arange(N), k].view(N, -1)))
@@ -385,7 +510,7 @@ def test_gaussian():
     method.train()
     batch_x = torch.rand(size=(128, 12))
     pred_params = method(batch_x)
-    target = torch.rand(size=(128,1))
+    target = torch.rand(size=(128, 1))
     loss = method.loss(target, pred_params)
     optim = torch.optim.SGD(method.parameters(), lr=1e-3)
     optim.zero_grad()
@@ -394,14 +519,14 @@ def test_gaussian():
     # correct values come from wolframalpha
     # see if the F value is correct
     CDFaty = method.get_F_at_y(
-        torch.tensor([-1, 0, 1, 2]).reshape(-1,1), pred_params=fixed_pred_params
+        torch.tensor([-1, 0, 1, 2]).reshape(-1, 1), pred_params=fixed_pred_params
     )
     assert torch.allclose(
         CDFaty, torch.tensor([0.0793, 0.2500, 0.4320, 0.7386]), atol=1e-3
     )
     # see if the f value is correct
     logscoreaty = method.get_logscore_at_y(
-        torch.tensor([-1, 0, 1, 2]).reshape(-1,1), pred_params=fixed_pred_params
+        torch.tensor([-1, 0, 1, 2]).reshape(-1, 1), pred_params=fixed_pred_params
     ).reshape(4)
     assert torch.allclose(
         logscoreaty, torch.tensor([2.1121, 1.6114, 1.7431, 0.8535]), atol=1e-3
@@ -432,7 +557,7 @@ def test_categorical_cross_entropy():
     pred_params = method(batch_x)
 
     # Create random target values within the range of bin_borders
-    target = torch.rand(size=(128,1)) * 4  # since bin borders range from 0 to 4
+    target = torch.rand(size=(128, 1)) * 4  # since bin borders range from 0 to 4
 
     # Calculate loss
     loss = method.loss(target, pred_params)
@@ -445,7 +570,7 @@ def test_categorical_cross_entropy():
 
     # Testing the CDF values
     CDFaty = method.get_F_at_y(
-        torch.tensor([0.5, 1.5, 2.5]).reshape(-1,1), pred_params=fixed_pred_params
+        torch.tensor([0.5, 1.5, 2.5]).reshape(-1, 1), pred_params=fixed_pred_params
     ).reshape(3)
     assert torch.allclose(
         CDFaty, torch.tensor([0.05, 0.3, 0.625]), atol=1e-3
@@ -453,19 +578,20 @@ def test_categorical_cross_entropy():
 
     # Testing the logscore values
     logscoreaty = method.get_logscore_at_y(
-        torch.tensor([0.5, 1.5, 2.5]).reshape(-1,1), pred_params=fixed_pred_params
+        torch.tensor([0.5, 1.5, 2.5]).reshape(-1, 1), pred_params=fixed_pred_params
     ).reshape(3)
     assert torch.allclose(
         logscoreaty, torch.tensor([2.3026, 1.6094, 1.3863]), atol=1e-3
     ), f"Log score values are incorrect: {logscoreaty}"
+
 
 def test_pinball():
     torch.autograd.set_detect_anomaly(True)
 
     # Assuming `MLP` and `CategoricalCrossEntropy` are defined as shown earlier
     # Setup model
-    method = PinballLoss( 
-        [12, 128, 128], quantile_levels=[0.2, 0.5, 0.8], bounds=[0.0, 1.0] 
+    method = PinballLoss(
+        [12, 128, 128], quantile_levels=[0.2, 0.5, 0.8], bounds=[0.0, 1.0]
     )
     method.train()
 
@@ -483,7 +609,7 @@ def test_pinball():
     pred_params = method(batch_x)
 
     # Create random target values within the range of bin_borders
-    target = torch.rand(size=(128,1))   # since bin borders range from 0 to 4
+    target = torch.rand(size=(128, 1))  # since bin borders range from 0 to 4
 
     # Calculate loss
     loss = method.loss(target, pred_params)
@@ -496,7 +622,7 @@ def test_pinball():
 
     # Testing the CDF values
     CDFaty = method.get_F_at_y(
-        torch.tensor([0.1, 0.5, 0.6]).reshape(-1,1), pred_params=fixed_pred_params
+        torch.tensor([0.1, 0.5, 0.6]).reshape(-1, 1), pred_params=fixed_pred_params
     ).reshape(3)
     assert torch.allclose(
         CDFaty, torch.tensor([0.1, 0.35, 0.8]), atol=1e-3
@@ -504,13 +630,11 @@ def test_pinball():
 
     # Testing the logscore values
     logscoreaty = method.get_logscore_at_y(
-        torch.tensor([0.1, 0.5, 0.6]).reshape(-1,1), pred_params=fixed_pred_params
+        torch.tensor([0.1, 0.5, 0.6]).reshape(-1, 1), pred_params=fixed_pred_params
     ).reshape(3)
     assert torch.allclose(
         logscoreaty, torch.tensor([0, 0.6931, -1.0986]), atol=1e-3
     ), f"Log score values are incorrect: {logscoreaty}"
-
-
 
 
 def test_all():
