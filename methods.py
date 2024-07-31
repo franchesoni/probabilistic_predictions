@@ -128,7 +128,7 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
         assert pis.shape[0] == batch_y.shape[0]
         assert len(batch_y.shape) == 1
         assert pis.shape[1] == self.n_components
-        batch_y = batch_y.view(-1, 1)
+        batch_y = batch_y.reshape(-1, 1)
         return (
             pis * 0.5 * (1 + torch.erf((batch_y - mus) / (sigmas * (2**0.5))))
         ).sum(dim=1)
@@ -140,14 +140,19 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
             pred_params[:, 2 * self.n_components :],
         )
         assert pis.shape[0] == batch_y.shape[0]
-        assert len(batch_y.shape) == 1
         assert pis.shape[1] == self.n_components
-        batch_y = batch_y.view(-1, 1)
+        assert len(batch_y.shape) == 2
+        batch_y = batch_y.unsqueeze(1)  # (B, 1, Y)
+        pis, mus, sigmas = (
+            pis.unsqueeze(2),
+            mus.unsqueeze(2),
+            sigmas.unsqueeze(2),
+        )  # (B, K, 1)
         log_prob_per_component = (
             -0.5 * (((batch_y - mus) / sigmas) ** 2) - torch.log(sigmas) - 0.5 * log2pi
-        )
+        )  # (B, K, Y)
         weighted_log_prob = torch.log(pis) + log_prob_per_component
-        neg_log_likelihood = -torch.logsumexp(weighted_log_prob, dim=1)
+        neg_log_likelihood = -torch.logsumexp(weighted_log_prob, dim=1)  # (B, Y)
         return neg_log_likelihood
 
     def loss(self, batch_y, pred_params):
@@ -192,7 +197,7 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
         )
         # bin index for each y
         k = torch.clamp(
-            torch.searchsorted(self.bin_borders, batch_y.view(N, 1)) - 1, 0, B - 1
+            torch.searchsorted(self.bin_borders, batch_y.reshape(N, 1)) - 1, 0, B - 1
         ).squeeze()
         # Compute CDF at y using linear interpolation
         cdf_at_y = cdf[torch.arange(N), k] + (
@@ -206,14 +211,11 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
         return cdf_at_y
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        y_bin = torch.bucketize(batch_y, self.bin_borders) - 1
-        assert (
-            y_bin.min() >= 0
-        ), "Seems like the target is out of bounds: min is {}, max is {}".format(
-            y_bin.min(), y_bin.max()
-        )
-        return nn.functional.nll_loss(
-            torch.log(pred_params + 1e-45), y_bin, reduction="none"
+        return get_logscore_at_y_PL(
+            batch_y,
+            all_quantiles=None,
+            bin_masses=pred_params,
+            bin_borders=self.bin_borders.reshape(1, -1),
         )
 
     def loss(self, batch_y, pred_params):
@@ -235,7 +237,7 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         It does not include the last layer.
         """
         super(PinballLoss, self).__init__()
-        self.quantile_levels = torch.sort(torch.tensor(quantile_levels))
+        self.quantile_levels = torch.sort(torch.tensor(quantile_levels))[0]
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
         self.lower, self.upper = bounds
@@ -250,15 +252,15 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         cdf = self.quantile_levels.expand(N, self.B + 1)
         bin_borders = torch.concatenate(
             (
-                torch.tensor(self.lower).view(1, 1).expand(N, 1),
+                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
                 pred_params,
-                torch.tensor(self.upper).view(1, 1).expand(N, 1),
+                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
             ),
             dim=1,
         )
         # bin index for each y
         k = torch.clamp(
-            torch.searchsorted(bin_borders, batch_y.view(N, 1)) - 1, 0, self.B - 1
+            torch.searchsorted(bin_borders, batch_y.reshape(N, 1)) - 1, 0, self.B - 1
         ).squeeze()
         # Compute CDF at y using linear interpolation
         cdf_at_y = cdf[torch.arange(N), k] + (
@@ -281,32 +283,25 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         return cdf_at_y
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        y_bin = torch.bucketize(batch_y, pred_params)
-        assert (
-            y_bin.min() >= 0
-        ), "Seems like the target is out of bounds: min is {}, max is {}".format(
-            y_bin.min(), y_bin.max()
-        )
-        # density is the cdf difference divided by the bin width
-        N = pred_params.shape[0]
-        cdf = self.quantile_levels.expand(N, self.B + 1)
+        N = batch_y.shape[0]
         bin_borders = torch.concatenate(
             (
-                torch.tensor(self.lower).view(1, 1).expand(N, 1),
+                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
                 pred_params,
-                torch.tensor(self.upper).view(1, 1).expand(N, 1),
+                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
             ),
             dim=1,
         )
-        pdf_at_y = (cdf[torch.arange(N), y_bin + 1] - cdf[torch.arange(N), y_bin]) / (
-            bin_borders[torch.arange(N), y_bin + 1]
-            - bin_borders[torch.arange(N), y_bin]
+        return get_logscore_at_y_PL(
+            batch_y,
+            all_quantiles=self.quantile_levels.reshape(1, -1),
+            bin_masses=None,
+            bin_borders=bin_borders,
         )
-        return -torch.log(pdf_at_y)
 
     def loss(self, batch_y, pred_params):
-        batch_y = batch_y.view(-1, 1)
-        pinball = (torch.quantile_levels[1:-1] - 1 * (batch_y < pred_params)) * (
+        batch_y = batch_y.reshape(-1, 1)
+        pinball = (self.quantile_levels[1:-1] - 1 * (batch_y < pred_params)) * (
             batch_y - pred_params
         )
         return pinball.sum(dim=1).mean()
@@ -318,19 +313,35 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         return self.model(batch_x)
 
 
-def get_method(method_name):
-    if method_name == "laplacescore":
-        return LaplaceLogScore
-    elif method_name == "laplacewb":
-        return LaplaceGlobalWidth
-    elif method_name == "mdn":
-        return MixtureDensityNetwork
-    elif method_name == "ce":
-        return CategoricalCrossEntropy
-    elif method_name == "pinball":
-        return PinballLoss
-    else:
-        raise ValueError(f"Unknown method name {method_name}")
+def get_logscore_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
+    assert (bin_masses is None and all_quantiles is not None) or (
+        bin_masses is not None and all_quantiles is None
+    )
+    N, Y = batch_y.shape
+    assert (all_quantiles is None and bin_masses.shape[0] in [1, N]) or (
+        bin_masses is None and all_quantiles.shape[0] in [1, N]
+    )
+    assert bin_borders.shape[0] in [1, N]
+    assert bin_borders.shape[1] == (
+        all_quantiles.shape[1] if all_quantiles is not None else bin_masses.shape[1] + 1
+    )
+    B = all_quantiles.shape[1] - 1 if all_quantiles is not None else bin_masses.shape[1]
+    # the log score of a histogram is the neg log of the pdf
+    # the pdf is the mass of the bin divided by the bin width
+    if bin_masses is None:
+        bin_masses = all_quantiles[:, 1:] - all_quantiles[:, :-1]  # (1N, B)
+    bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (1N, B)
+    bin_densities = bin_masses / bin_widths  # (1N, B)
+    y_bin = torch.clamp(
+        torch.searchsorted(bin_borders.squeeze(), batch_y, right=True) - 1, 0, B - 1
+    )  # here we squeeze bin borders because when it has leading shape N it's fine, but when it has leading shape 1 it's not (we need to make it 1d in that case)
+    # reshape and compute
+    bin_densities = bin_densities.reshape(N, B, 1)  # (N, 1, B)
+    y_bin = y_bin.reshape(N, 1, y_bin.shape[1])  # (N, 1, Y)
+    log_score = -(
+        torch.log(bin_densities + 1e-45) * (y_bin == torch.arange(B).reshape(1, B, 1))
+    ).sum(dim=1)
+    return log_score
 
 
 def test_laplace():
@@ -454,3 +465,18 @@ def test_all():
 
 if __name__ == "__main__":
     test_all()
+
+
+def get_method(method_name):
+    if method_name == "laplacescore":
+        return LaplaceLogScore
+    elif method_name == "laplacewb":
+        return LaplaceGlobalWidth
+    elif method_name == "mdn":
+        return MixtureDensityNetwork
+    elif method_name == "ce":
+        return CategoricalCrossEntropy
+    elif method_name == "pinball":
+        return PinballLoss
+    else:
+        raise ValueError(f"Unknown method name {method_name}")
