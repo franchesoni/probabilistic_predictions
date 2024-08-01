@@ -317,7 +317,12 @@ class CRPSHist(ProbabilisticMethod, nn.Module):
         )
 
     def loss(self, batch_y, pred_params):
-        return get_crps_PL(batch_y, cdf_at_borders=None, bin_masses=pred_params, bin_borders=self.bin_borders.reshape(1, self.B+1)).mean()
+        return get_crps_PL(
+            batch_y,
+            cdf_at_borders=None,
+            bin_masses=pred_params,
+            bin_borders=self.bin_borders.reshape(1, self.B + 1),
+        ).mean()
 
     def is_PL(self) -> bool:
         return True
@@ -327,8 +332,11 @@ class CRPSHist(ProbabilisticMethod, nn.Module):
         masses = nn.functional.softmax(logits, dim=1)
         return masses
 
+
 class CRPSQR(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, quantile_levels, bounds, predict_residuals=False, **kwargs):
+    def __init__(
+        self, layer_sizes, quantile_levels, bounds, predict_residuals=False, **kwargs
+    ):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
@@ -393,7 +401,12 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
             return (-bin_widths * (bin_widths < 0)).sum()
         else:
-            return get_crps_PL(batch_y, self.quantile_levels.reshape(1,-1), bin_masses=None, bin_borders=bin_borders).mean()
+            return get_crps_PL(
+                batch_y,
+                self.quantile_levels.reshape(1, -1),
+                bin_masses=None,
+                bin_borders=bin_borders,
+            ).mean()
 
     def is_PL(self) -> bool:
         return True
@@ -401,13 +414,11 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
     def forward(self, batch_x):
         out = self.model(batch_x)
         if self.predict_residuals:
-            residuals = torch.concatenate((out[:, :1], nn.functional.softplus(out[:, 1:])), dim=1)
+            residuals = torch.concatenate(
+                (out[:, :1], nn.functional.softplus(out[:, 1:])), dim=1
+            )
             out = torch.cumsum(residuals, dim=1)
         return out
-            
-
-
-
 
 
 def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
