@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+
 
 from ucimlrepo import fetch_ucirepo
 
@@ -28,7 +30,14 @@ class AbstractDataset(ABC):
 
 
 class BishopToy(AbstractDataset, torch.utils.data.Dataset):
-    def __init__(self, seed=0, noise_strength=0.1, n_samples=10000):
+    def __init__(self, noise_strength=0.1, n_samples=1000, split='train'):
+        if split == 'train':
+            seed = 0
+        elif split == 'val':
+            seed = 1
+        elif split == 'test':
+            seed = 2
+
         torch.manual_seed(seed)
         self.noise_strength = noise_strength
         self.n_samples = n_samples
@@ -72,7 +81,6 @@ def dotdict_to_dict(d):
     else:
         return d
 
-
 # cache the fetching of datasets
 def cached_fetch_ucirepo(name):
     # Directory for cache files
@@ -102,7 +110,7 @@ def cached_fetch_ucirepo(name):
 
 
 class UCIRepoDataset(AbstractDataset, torch.utils.data.Dataset):
-    def __init__(self, name):
+    def __init__(self, name, split="train", seed=0):
         dataset = cached_fetch_ucirepo(name=name)
         self.X = dataset["data"]["features"]
         if (dataset["variables"]["type"] == "Categorical").any():
@@ -123,11 +131,24 @@ class UCIRepoDataset(AbstractDataset, torch.utils.data.Dataset):
         min_per_col = self.X.min(axis=0, keepdims=True)  # 1, D
         max_per_col = self.X.max(axis=0, keepdims=True)  # 1, D
         self.X = (
-            2 * (self.X - min_per_col) / (max_per_col - min_per_col) - 1
-        )  # inputs are in [-1, 1]
+            (self.X - min_per_col) / (max_per_col - min_per_col) 
+        )  # inputs are in [0, 1]
         self.y = (self.y - self.y.min()) / (
             self.y.max() - self.y.min()
         )  # outputs are in [0, 1]
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, self.y, test_size=0.33, random_state=seed)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train, y_train, test_size=0.2, random_state=seed)
+        if split == "train":
+            self.X = X_train
+            self.y = y_train
+        elif split == "val":    
+            self.X = X_val
+            self.y = y_val
+        elif split == "test":   
+            self.X = X_test
+            self.y = y_test
 
     def __len__(self):
         return len(self.X)
