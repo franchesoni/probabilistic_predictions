@@ -1,7 +1,7 @@
 import torch
 from itertools import product
 from numpy import mean, ceil
-from time import strftime
+from time import strftime, time
 from pathlib import Path
 import schedulefree
 import matplotlib.pyplot as plt
@@ -31,12 +31,6 @@ def hparams_iterator(**kwargs):
         yield dict(zip(keys, combination))
 
 
-# Example usage
-params = {"lr": [0.01, 0.001, 0.0001], "seed": [1, 2, 3]}
-
-for hparams in hparams_iterator(**params):
-    print(hparams)
-
 
 def main(
     method_name,
@@ -45,9 +39,9 @@ def main(
     steps=5000,
     max_time_per_run=180,
     batch_size=128,
-    model_sizes="base",
-    lrs=1e-2,
-    betas=0.9,
+    model_sizes=["base", "small", "large"],
+    lrs=[1e-2, 1e-3, 1e-4],
+    betas=[0.9, 0.95],
     seeds=0,
     tag="",
     select_by="crps",
@@ -82,8 +76,9 @@ def main(
         method_kwargs=method_kwargss,
     ):
         seed = hparams["seed"]
-        lr = hparams["lr"]
         model_size = hparams["model_size"]
+        beta = hparams["beta"]
+        lr = hparams["lr"]
         method_kwargs = hparams["method_kwargs"]
 
         if model_size == "base":
@@ -182,11 +177,15 @@ def main(
 
     print("*" * 40)
     # now load the best model
-    seed, hidden_dim, hidden_layers, lr, beta, method_kwargs = best_hparams
+    seed = best_hparams["seed"]
+    model_size = best_hparams["model_size"]
+    beta = best_hparams["beta"]
+    lr = best_hparams["lr"]
+    method_kwargs = best_hparams["method_kwargs"]
     model = get_method(method_name)(
         [trainds.get_feature_dim(), *([hidden_dim] * hidden_layers)], **method_kwargs
     ).to(DEVICE)
-    model = model.load_state_dict(torch.load(dstdir / "best_model.pth"))
+    model.load_state_dict(torch.load(dstdir / "best_model.pth"), strict=True)
 
     # evaluate on test
     test_alphas, test_alphas_ranks, test_ece, test_loss, test_logscore, test_crps = (
@@ -203,8 +202,6 @@ def main(
         + f"\nTest CRPS: {test_crps}"
         + f"\nTest ECE: {test_ece}"
     )
-
-    from time import time
 
     st = time()
     # figures and log
@@ -331,8 +328,11 @@ def evaluate(dataloader, model, optimizer):
             alphas_targets.append(
                 torch.concatenate((model.get_F_at_y(target, pred), target), dim=1).cpu()
             )
-            if model.is_PL():
-                closed_crps = get_crps_PL(target, **model.prepare_params(pred))
+            # if model.is_PL():
+            #     try:
+            #         closed_crps = get_crps_PL(target, **model.prepare_params(pred))
+            #     except AssertionError as e:
+            #         print(e)
         alphas_targets = torch.cat(alphas_targets, dim=0)  # (N, 2)
         alphas = alphas_targets[:, 0].float()
         alphas_ranks = torch.empty_like(alphas)
