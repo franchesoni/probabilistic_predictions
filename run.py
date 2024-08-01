@@ -1,12 +1,12 @@
 import torch
-from numpy import mean
+from numpy import mean, ceil
 import time
 from pathlib import Path
 import schedulefree
 import matplotlib.pyplot as plt
 
 from datasets import get_dataset
-from methods import get_method
+from methods import get_method, get_crps_PL
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -36,7 +36,10 @@ def main(
     trainds = get_dataset(dataset_name, n_samples=10000, seed=0)
     valds = get_dataset(dataset_name, n_samples=1000, seed=1)
     traindl = torch.utils.data.DataLoader(trainds, batch_size=batch_size, shuffle=True)
-    valdl = torch.utils.data.DataLoader(valds, batch_size=batch_size, shuffle=False)
+    val_batch_size = batch_size
+    while not (len(valds) % val_batch_size == 0):
+        val_batch_size -= 1
+    valdl = torch.utils.data.DataLoader(valds, batch_size=val_batch_size, shuffle=False)
 
     torch.manual_seed(seed)
     model = get_method(method_name)(
@@ -46,6 +49,8 @@ def main(
         model.parameters(), lr=lr, warmup_steps=int(steps * 0.05)
     )
 
+    print("=" * 30)
+    print(f"Training {method_name} on {dataset_name} with {steps} steps")
     loss_curve = []
     model.train()
     optimizer.train()
@@ -70,9 +75,13 @@ def main(
         if end_training:
             break
 
+    if hasattr(model, "global_width") and not model.train_width:
+        model.global_width.data = torch.tensor([mean(loss_curve[-steps // 20 :])]).to(
+            DEVICE
+        )
     model.eval()
     optimizer.eval()
-    val_losses = []
+    val_losses, val_logscores, val_crpss, val_alphas_targets = [], [], [], []
     with torch.no_grad():
         for feat_vec, target in valdl:
             feat_vec, target = feat_vec.to(DEVICE), target.to(DEVICE)
@@ -80,14 +89,50 @@ def main(
             target = target.reshape(target.shape[0], -1)
             pred = model(feat_vec)
             val_losses.append(model.loss(target, pred))
+            val_logscores.append(model.get_logscore_at_y(target, pred))
+            val_crpss.append(
+                model.get_numerical_CRPS(
+                    target, pred, lower=0., upper=1., count=1000
+                )
+            )
+            val_alphas_targets.append(torch.concatenate((model.get_F_at_y(target, pred), target), dim=1))
+            if model.is_PL():
+                closed_crps = get_crps_PL(target, **model.prepare_params(pred)) 
+        val_alphas_targets = torch.cat(val_alphas_targets, dim=0)  # (N, 2)
+        val_alphas = val_alphas_targets[:, 0]
+        val_alphas_ranks = torch.empty_like(val_alphas)
+        val_alphas_ranks[val_alphas.argsort()] = torch.arange(len(val_alphas)).float()
+        ece = mean((torch.abs(val_alphas - val_alphas_ranks / len(val_alphas))).cpu().numpy())
         meanvalloss = mean(val_losses)
-        print(f"Validation Loss: {meanvalloss}")
-        str_to_log += f"\nValidation Loss: {meanvalloss}"
-    if hasattr(model, "global_width") and not model.train_width:
-        model.global_width.data = torch.tensor([meanvalloss]).to(DEVICE)
+        meanvallogscores = mean(val_logscores)
+        meanvalcrpss = mean(val_crpss)
+
+
+    print(f"Validation Loss: {meanvalloss}")
+    print(f"Validation Logscore: {meanvallogscores}")
+    print(f"Validation CRPS: {meanvalcrpss}")
+    print(f"Validation ECE: {ece}")
+    str_to_log += (
+        f"\nValidation Loss: {meanvalloss}"
+        + f"\nValidation Logscore: {meanvallogscores}"
+        + f"\nValidation CRPS: {meanvalcrpss}"
+        + f"\nValidation ECE: {ece}"
+    )
 
     # figures and log
     dstdir.mkdir(parents=True, exist_ok=True)
+    plt.figure()
+    plt.hist(val_alphas.cpu().numpy(), bins=100, density=True)
+    plt.xlabel(r"$\alpha$")
+    plt.ylabel("Frequency")
+    plt.savefig(dstdir / "PIT_hist.png")
+
+    plt.figure()
+    plt.plot(val_alphas.cpu().numpy(), val_alphas_ranks.cpu().numpy() / len(val_alphas), ".")
+    plt.xlabel(r"$\alpha$")
+    plt.ylabel(r"$\alpha_{(i)}/N$")
+    plt.savefig(dstdir / "reliability.png")
+
     plt.figure()
     plt.plot(loss_curve)
     plt.xlabel("Step")
@@ -104,13 +149,25 @@ def main(
     # Calculate the Laplace PDF values for the grid
     with torch.no_grad():
         params = model(x_vis)
-        energy = model.get_logscore_at_y(y_grid.expand(x_vis.shape[0], -1).contiguous(), params)
+        energy = model.get_logscore_at_y(
+            y_grid.expand(x_vis.shape[0], -1).contiguous(), params
+        )
     # mu = y_vis.reshape(-1, 1)  # Median from the predictions
     # pdf_values = (1 / (2 * b)) * torch.exp(-torch.abs(y_grid - mu) / b)
     plt.figure()
-    plt.scatter(trainds.X.cpu().numpy(), trainds.Y.cpu().numpy(), s=1, label="Data", color="black")
+    plt.scatter(
+        trainds.X.cpu().numpy(),
+        trainds.Y.cpu().numpy(),
+        s=1,
+        label="Data",
+        color="black",
+    )
     for i in range(params.shape[1]):
-        plt.plot(x_vis.cpu().numpy().reshape(-1), params[:, i].cpu().numpy(), label=f"Param {i}")
+        plt.plot(
+            x_vis.cpu().numpy().reshape(-1),
+            params[:, i].cpu().numpy(),
+            label=f"Param {i}",
+        )
     plt.legend()
     plt.xlabel("X")
     plt.ylabel("Params")
