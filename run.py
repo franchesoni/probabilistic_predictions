@@ -99,7 +99,7 @@ def main(
             if model.is_PL():
                 closed_crps = get_crps_PL(target, **model.prepare_params(pred)) 
         val_alphas_targets = torch.cat(val_alphas_targets, dim=0)  # (N, 2)
-        val_alphas = val_alphas_targets[:, 0]
+        val_alphas = val_alphas_targets[:, 0].float()
         val_alphas_ranks = torch.empty_like(val_alphas)
         val_alphas_ranks[val_alphas.argsort()] = torch.arange(len(val_alphas)).float()
         ece = mean((torch.abs(val_alphas - val_alphas_ranks / len(val_alphas))).cpu().numpy())
@@ -121,6 +121,9 @@ def main(
 
     # figures and log
     dstdir.mkdir(parents=True, exist_ok=True)
+
+    # increase font size
+    plt.rcParams.update({'font.size': 16})
     plt.figure()
     plt.hist(val_alphas.cpu().numpy(), bins=100, density=True)
     plt.xlabel(r"$\alpha$")
