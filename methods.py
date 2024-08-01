@@ -41,6 +41,18 @@ class ProbabilisticMethod(ABC):
     def forward(self, batch_x):
         pass
 
+    def get_numerical_CRPS(self, batch_y, pred_params, lower, upper, count):
+        assert batch_y.shape[1] == 1
+        dys = torch.linspace(lower, upper, count).reshape(1, count).expand(pred_params.shape[0], count).to(batch_y.device)
+        Fy = self.get_F_at_y(dys, pred_params)  # (N, count)
+        heaviside = 1 * (batch_y <= dys)  # (N, count)
+        integrant = (Fy - heaviside)**2  # (N, count)
+        crps = (dys[0, 1] - dys[0, 0]) * (integrant[:, 0] / 2 + integrant[:, 1:].sum(dim=1) + integrant[:, -1] / 2)  # (N,)
+        return crps
+        
+        
+
+
 
 class LaplaceLogScore(ProbabilisticMethod, nn.Module):
     def __init__(self, layer_sizes, **kwargs):
@@ -126,16 +138,15 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
             pred_params[:, 2 * self.n_components :],
         )
         assert pis.shape[0] == batch_y.shape[0]
+        assert pis.shape[1] == self.n_components
         assert (
             len(batch_y.shape) == 2
         ), f"batch_y.shape is {batch_y.shape} but should be (N, 1)"
-        assert pis.shape[1] == self.n_components
-        batch_y = batch_y.reshape(
-            batch_y.shape[0], 1
-        )  # if this is not possible we need to change the code
+        batch_y = batch_y.unsqueeze(1)  # (N, 1, Y)
+        pis, mus, sigmas = pis.unsqueeze(2), mus.unsqueeze(2), sigmas.unsqueeze(2)  # (N, K, 1)
         return (
             pis * 0.5 * (1 + torch.erf((batch_y - mus) / (sigmas * (2**0.5))))
-        ).sum(dim=1)
+        ).sum(dim=1)  # (N, Y)
 
     def get_logscore_at_y(self, batch_y, pred_params):
         pis, mus, sigmas = (
@@ -192,21 +203,22 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
         assert self.bin_widths.min() > 0, "Bin borders must be strictly increasing"
         self.model = MLP(layer_sizes + [self.B], **kwargs)
 
+    def prepare_params(self, pred_params):
+        return dict(cdf_at_borders = None, 
+        bin_masses = pred_params,
+        bin_borders=self.bin_borders.reshape(1, -1))
+
     def get_F_at_y(self, batch_y, pred_params):
         bin_masses = pred_params
         return get_F_at_y_PL(
             batch_y,
-            cdf_at_borders=None,
-            bin_masses=bin_masses,
-            bin_borders=self.bin_borders.reshape(1, -1),
+            **self.prepare_params(pred_params)
         )
 
     def get_logscore_at_y(self, batch_y, pred_params):
         return get_logscore_at_y_PL(
             batch_y,
-            cdf_at_borders=None,
-            bin_masses=pred_params,
-            bin_borders=self.bin_borders.reshape(1, -1),
+            **self.prepare_params(pred_params)
         )
 
     def loss(self, batch_y, pred_params):
@@ -238,7 +250,9 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         self.B = len(self.quantile_levels) - 1
         self.model = MLP(layer_sizes + [len(quantile_levels)], **kwargs)
 
-    def get_F_at_y(self, batch_y, pred_params):
+    def prepare_params(self, pred_params):
+        cdf_at_borders=self.quantile_levels.reshape(1, -1)
+        bin_masses=None
         N, Q = pred_params.shape  # Q = number of quantiles
         bin_borders = torch.concatenate(
             (
@@ -248,29 +262,26 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
             ),
             dim=1,
         )
+        bin_borders = torch.sort(bin_borders, dim=1)[0]  # we can do this as we don't care about this gradient
+        return dict(cdf_at_borders = cdf_at_borders,
+        bin_masses = bin_masses,
+        bin_borders=bin_borders)
+ 
+
+    def get_F_at_y(self, batch_y, pred_params):
         return get_F_at_y_PL(
             batch_y,
-            cdf_at_borders=self.quantile_levels.reshape(1, -1),
-            bin_masses=None,
-            bin_borders=bin_borders,
+            **self.prepare_params(pred_params)
         )
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        N = batch_y.shape[0]
-        bin_borders = torch.concatenate(
-            (
-                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
-                pred_params,
-                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
-            ),
-            dim=1,
-        )
-        return get_logscore_at_y_PL(
+        logscore = get_logscore_at_y_PL(
             batch_y,
-            cdf_at_borders=self.quantile_levels.reshape(1, -1),
-            bin_masses=None,
-            bin_borders=bin_borders,
+            **self.prepare_params(pred_params)
         )
+        if torch.isnan(logscore).any():
+            raise ValueError("NaN in logscore")
+        return logscore
 
     def loss(self, batch_y, pred_params):
         batch_y = batch_y.reshape(-1, 1)
@@ -299,29 +310,28 @@ class CRPSHist(ProbabilisticMethod, nn.Module):
         assert self.bin_widths.min() > 0, "Bin borders must be strictly increasing"
         self.model = MLP(layer_sizes + [self.B], **kwargs)
 
+    def prepare_params(self, pred_params):
+        return dict(cdf_at_borders=None, 
+        bin_masses=pred_params,
+        bin_borders=self.bin_borders.reshape(1, self.B + 1))
+
     def get_F_at_y(self, batch_y, pred_params):
         bin_masses = pred_params
         return get_F_at_y_PL(
             batch_y,
-            cdf_at_borders=None,
-            bin_masses=bin_masses,
-            bin_borders=self.bin_borders.reshape(1, -1),
+            **self.prepare_params(pred_params)
         )
 
     def get_logscore_at_y(self, batch_y, pred_params):
         return get_logscore_at_y_PL(
             batch_y,
-            cdf_at_borders=None,
-            bin_masses=pred_params,
-            bin_borders=self.bin_borders.reshape(1, -1),
+            **self.prepare_params(pred_params)
         )
 
     def loss(self, batch_y, pred_params):
         return get_crps_PL(
             batch_y,
-            cdf_at_borders=None,
-            bin_masses=pred_params,
-            bin_borders=self.bin_borders.reshape(1, self.B + 1),
+            **self.prepare_params(pred_params)
         ).mean()
 
     def is_PL(self) -> bool:
@@ -353,7 +363,9 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         self.model = MLP(layer_sizes + [len(quantile_levels)], **kwargs)
         self.predict_residuals = predict_residuals
 
-    def get_F_at_y(self, batch_y, pred_params):
+    def prepare_params(self, pred_params):
+        cdf_at_borders=self.quantile_levels.reshape(1, -1)
+        bin_masses=None
         N, Q = pred_params.shape  # Q = number of quantiles
         bin_borders = torch.concatenate(
             (
@@ -363,49 +375,32 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
             ),
             dim=1,
         )
+        return dict(cdf_at_borders = cdf_at_borders,
+        bin_masses = bin_masses,
+        bin_borders=bin_borders)
+
+
+    def get_F_at_y(self, batch_y, pred_params):
         return get_F_at_y_PL(
             batch_y,
-            cdf_at_borders=self.quantile_levels.reshape(1, -1),
-            bin_masses=None,
-            bin_borders=bin_borders,
+            **self.prepare_params(pred_params)
         )
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        N = batch_y.shape[0]
-        bin_borders = torch.concatenate(
-            (
-                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
-                pred_params,
-                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
-            ),
-            dim=1,
-        )
         return get_logscore_at_y_PL(
             batch_y,
-            cdf_at_borders=self.quantile_levels.reshape(1, -1),
-            bin_masses=None,
-            bin_borders=bin_borders,
+            **self.prepare_params(pred_params)
         )
 
     def loss(self, batch_y, pred_params):
-        N = batch_y.shape[0]
-        bin_borders = torch.concatenate(
-            (
-                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
-                pred_params,
-                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
-            ),
-            dim=1,
-        )
+        bin_borders = self.prepare_params(pred_params)["bin_borders"]
         bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
         if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
             return (-bin_widths * (bin_widths < 0)).sum()
         else:
             return get_crps_PL(
                 batch_y,
-                self.quantile_levels.reshape(1, -1),
-                bin_masses=None,
-                bin_borders=bin_borders,
+                **self.prepare_params(pred_params)
             ).mean()
 
     def is_PL(self) -> bool:
@@ -431,6 +426,7 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     assert (bin_masses is None and cdf_at_borders is not None) or (
         bin_masses is not None and cdf_at_borders is None
     )
+    batch_y = batch_y.contiguous()
     N, Y = batch_y.shape
     assert (cdf_at_borders is None and bin_masses.shape[0] in [1, N]) or (
         bin_masses is None and cdf_at_borders.shape[0] in [1, N]
@@ -458,9 +454,11 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     else:
         cdf_at_borders = cdf_at_borders.expand(N, B + 1).contiguous()
         bin_masses = cdf_at_borders[:, 1:] - cdf_at_borders[:, :-1]  # (N, B)
+    cdf_at_borders = cdf_at_borders.float()  # else the comparison below might fail
     bin_borders = bin_borders.expand(N, B + 1).contiguous()
-    assert N > 1  # to ensure squeeze is irrelevant
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+    assert torch.isclose(cdf_at_borders[0, 0], torch.tensor(0.)) and torch.isclose(cdf_at_borders[-1, -1], torch.tensor(1.)), f"CDF is at borders {cdf_at_borders[0, 0]} {cdf_at_borders[-1, -1]} but should be 0 and 1"
+    bin_borders = bin_borders.contiguous()  
     return N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths
 
 
@@ -475,7 +473,7 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (1N, B)
     bin_densities = bin_masses / bin_widths  # (1N, B)
     y_bin = torch.clamp(
-        torch.searchsorted(bin_borders.squeeze(), batch_y) - 1, 0, B - 1
+        torch.searchsorted(bin_borders.squeeze() if (bin_borders.shape[0] == 1 and Y > 1) else bin_borders, batch_y) - 1, 0, B - 1
     )  # here we squeeze bin borders because when it has leading shape N it's fine, but when it has leading shape 1 it's not (we need to make it 1d in that case)
     # reshape and compute
     bin_densities = bin_densities.reshape(N, B, 1)  # (N, 1, B)
@@ -485,24 +483,33 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     ).sum(dim=1)
     return log_score
 
+def get_values_at(tensor, k):
+    """k is (N, Y), we index it with n, y.
+    We return out[n,y] = tensor[n, k[n, y]]"""
+    assert tensor.shape[0] == k.shape[0]
+    assert len(k.shape) == 2
+    N, Y = k.shape
+    return tensor[torch.arange(N).reshape(N, 1).expand(N, Y), k]
 
 def get_F_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths = (
         handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders)
     )
     # bin index for each y
+    purek = torch.searchsorted(bin_borders, batch_y) - 1
     k = torch.clamp(
-        torch.searchsorted(bin_borders, batch_y) - 1, 0, B - 1
-    ).squeeze()  # (N, Y) or (N,)
-    cdf_at_borderk = cdf_at_borders[torch.arange(N), k].view(N, -1)  # (N, Y)
+        purek, 0, B - 1
+    )  # (N, Y) or (N,)
+    cdf_at_borderk = get_values_at(cdf_at_borders, k)  # (N, Y)
     cdf_at_y = cdf_at_borderk + (
         (
-            (batch_y - bin_borders[torch.arange(N), k].view(N, -1))  # (N, Y)
-            * (cdf_at_borders[torch.arange(N), k + 1].view(N, -1) - cdf_at_borderk)
-            / (bin_widths[torch.arange(N), k].view(N, -1) + 1e-45)
+            (batch_y - get_values_at(bin_borders,k))  # (N, Y)
+            * (get_values_at(cdf_at_borders, k + 1) - cdf_at_borderk)
+            / (get_values_at(bin_widths, k) + 1e-45)
         )
-        * (1 * (0 < bin_widths[torch.arange(N), k].view(N, -1)))
+        * (1 * (0 < get_values_at(bin_widths, k)))
     )
+    cdf_at_y[purek < 0] = 0
     return cdf_at_y
 
 
@@ -558,16 +565,14 @@ def get_crps_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
         torch.searchsorted(bin_borders, batch_y) - 1
     )  # (N, Y)  (starts with 0 (unless y < b_0) and contains the index of the bin y is included in)
     # note that k-1 is the index of the bin that ends at b_k
-    km1 = torch.clamp(purekm1, 0, B - 1).squeeze()  # (N,) or (N, Y)
+    km1 = torch.clamp(purekm1, 0, B - 1)  # (N,) or (N, Y)
 
-    cdf_at_borderkm1 = cdf_at_borders[torch.arange(N), km1].view(N, -1)  # (N, Y)
-    cdf_at_borderk = cdf_at_borders[torch.arange(N), km1 + 1].view(N, -1)  # (N, Y)
-    bin_widths_km1 = bin_widths.expand(N, B)[torch.arange(N), km1].view(
-        N, -1
-    )  # (N, Y)  width of interval [b_km1, b_k] where y is included
+    cdf_at_borderkm1 = get_values_at(cdf_at_borders, km1)  # (N, Y)
+    cdf_at_borderk = get_values_at(cdf_at_borders, km1 + 1)  # (N, Y)
+    bin_widths_km1 = get_values_at(bin_widths.expand(N, B), km1)  # (N, Y)  width of interval [b_km1, b_k] where y is included
     cdf_at_y = cdf_at_borderkm1 + (
         (
-            (batch_y - bin_borders[torch.arange(N), km1].view(N, -1))  # (N, Y)
+            (batch_y - get_values_at(bin_borders, km1))  # (N, Y)
             * (cdf_at_borderk - cdf_at_borderkm1)
             / (bin_widths_km1 + 1e-45)
         )
@@ -577,7 +582,7 @@ def get_crps_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     partC = (
         (cdf_at_y + cdf_at_borderk)  # (N, Y)
         / 2
-        * (bin_borders[torch.arange(N), km1 + 1].view(N, -1) - batch_y)
+        * (get_values_at(bin_borders, km1+1) - batch_y)
     ) * (
         (bin_borders[:, 0:1] < batch_y)
     ).float()  # non-zero if b_0 < y < b_B
@@ -640,7 +645,7 @@ def test_gaussian():
     # see if the F value is correct
     CDFaty = method.get_F_at_y(
         torch.tensor([-1, 0, 1, 2]).reshape(-1, 1), pred_params=fixed_pred_params
-    )
+    ).reshape(4)
     assert torch.allclose(
         CDFaty, torch.tensor([0.0793, 0.2500, 0.4320, 0.7386]), atol=1e-3
     )
@@ -756,12 +761,41 @@ def test_pinball():
         logscoreaty, torch.tensor([0, 0.6931, -1.0986]), atol=1e-3
     ), f"Log score values are incorrect: {logscoreaty}"
 
+def test_crps():
+    import numpy as np
+    bs = np.array([0, 0.25, 0.5, 0.75, 1])
+    B = len(bs) - 1
+    pdf = [0.85, 0.25, 0.45, 0.25]
+    pdf = pdf / np.sum(pdf)
+    y = 0.3
+
+    assert B == len(pdf)
+
+    def integrate(low, high, points, func):
+        dx = (high - low) / (points - 1)
+        values = [func(low + i * dx) for i in range(points)]
+        return np.trapz(values, dx=dx)
+    cdf_values = np.array([0] + list(np.cumsum(pdf)))
+    def cdf_func(x):
+        return np.interp(x, bs, cdf_values)
+    sq_diff = lambda x: (cdf_func(x) - 1*(y<=x)) ** 2
+    print('crps:', integrate(-1, 1, 100000, sq_diff))
+
+    numerical = CategoricalCrossEntropy(layer_sizes=[1], bin_borders=bs).get_numerical_CRPS(batch_y=torch.tensor([[y]]), pred_params=torch.tensor(pdf).view(1, -1), lower=-1, upper=1, count=10000)
+    print('our numerical crps', numerical)
+
+    ourcrps = get_crps_PL(batch_y=torch.tensor([[y]]), cdf_at_borders=torch.tensor(np.array([cdf_values])), bin_masses=None, bin_borders=torch.tensor(np.array([bs])))
+    print('our crps:', ourcrps)
+
+
+
 
 def test_all():
     test_laplace()
     test_gaussian()
     test_categorical_cross_entropy()
     test_pinball()
+    test_crps()
 
 
 if __name__ == "__main__":
