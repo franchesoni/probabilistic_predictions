@@ -459,6 +459,13 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
     assert torch.isclose(cdf_at_borders[0, 0], torch.tensor(0.)) and torch.isclose(cdf_at_borders[-1, -1], torch.tensor(1.)), f"CDF is at borders {cdf_at_borders[0, 0]} {cdf_at_borders[-1, -1]} but should be 0 and 1"
     bin_borders = bin_borders.contiguous()  
+    # send all tensors to the right device
+    cdf_at_borders, bin_masses, bin_borders, bin_widths = (
+        cdf_at_borders.to(batch_y.device),
+        bin_masses.to(batch_y.device),
+        bin_borders.to(batch_y.device),
+        bin_widths.to(batch_y.device),
+    )
     return N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths
 
 
@@ -479,7 +486,7 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     bin_densities = bin_densities.reshape(N, B, 1)  # (N, 1, B)
     y_bin = y_bin.reshape(N, 1, y_bin.shape[1])  # (N, 1, Y)
     log_score = -(
-        torch.log(bin_densities + 1e-45) * (y_bin == torch.arange(B).reshape(1, B, 1))
+        torch.log(bin_densities + 1e-45) * (y_bin == torch.arange(B, device=batch_y.device).reshape(1, B, 1))
     ).sum(dim=1)
     return log_score
 
