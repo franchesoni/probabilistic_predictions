@@ -107,9 +107,11 @@ class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
         )
 
     def get_logscore_at_y(self, batch_y, pred_params):
+        self.global_width = self.global_width.to(pred_params.device)
         mus, bs = pred_params, self.global_width
         assert bs > 0, "Width must be positive"
-        return torch.log(2 * bs) + torch.abs(mus - batch_y) / bs
+        out = torch.log(2 * bs) + torch.abs(mus - batch_y) / bs
+        return out
 
     def loss(self, batch_y, pred_params):
         return self.get_logscore_at_y(batch_y, pred_params).sum()
@@ -244,6 +246,7 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
         self.lower, self.upper = bounds
+        self.lower, self.upper = torch.tensor(self.lower), torch.tensor(self.upper)
         self.quantile_levels = torch.concatenate(
             (torch.tensor([0]), self.quantile_levels, torch.tensor([1]))
         )
@@ -251,14 +254,16 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         self.model = MLP(layer_sizes + [len(quantile_levels)], **kwargs)
 
     def prepare_params(self, pred_params):
+        self.lower, self.upper = self.lower.to(pred_params.device), self.upper.to(pred_params.device)
+        self.quantile_levels = self.quantile_levels.to(pred_params.device)
         cdf_at_borders=self.quantile_levels.reshape(1, -1)
         bin_masses=None
         N, Q = pred_params.shape  # Q = number of quantiles
         bin_borders = torch.concatenate(
             (
-                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
+                self.lower.reshape(1, 1).expand(N, 1),
                 pred_params,
-                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
+                self.upper.reshape(1, 1).expand(N, 1),
             ),
             dim=1,
         )
@@ -285,6 +290,7 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
 
     def loss(self, batch_y, pred_params):
         batch_y = batch_y.reshape(-1, 1)
+        self.quantile_levels = self.quantile_levels.to(batch_y.device)
         pinball = (self.quantile_levels[1:-1] - 1 * (batch_y < pred_params)) * (
             batch_y - pred_params
         )
@@ -356,6 +362,7 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
         self.lower, self.upper = bounds
+        self.lower, self.upper = torch.tensor(self.lower), torch.tensor(self.upper)
         self.quantile_levels = torch.concatenate(
             (torch.tensor([0]), self.quantile_levels, torch.tensor([1]))
         )
@@ -364,14 +371,15 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         self.predict_residuals = predict_residuals
 
     def prepare_params(self, pred_params):
+        self.lower, self.upper = self.lower.to(pred_params.device), self.upper.to(pred_params.device)
         cdf_at_borders=self.quantile_levels.reshape(1, -1)
         bin_masses=None
         N, Q = pred_params.shape  # Q = number of quantiles
         bin_borders = torch.concatenate(
             (
-                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
+                self.lower.reshape(1, 1).expand(N, 1),
                 pred_params,
-                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
+                self.upper.reshape(1, 1).expand(N, 1),
             ),
             dim=1,
         )
