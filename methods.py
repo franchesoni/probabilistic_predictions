@@ -204,7 +204,7 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
     def get_logscore_at_y(self, batch_y, pred_params):
         return get_logscore_at_y_PL(
             batch_y,
-            all_quantiles=None,
+            cdf_at_borders=None,
             bin_masses=pred_params,
             bin_borders=self.bin_borders.reshape(1, -1),
         )
@@ -267,7 +267,7 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         )
         return get_logscore_at_y_PL(
             batch_y,
-            all_quantiles=self.quantile_levels.reshape(1, -1),
+            cdf_at_borders=self.quantile_levels.reshape(1, -1),
             bin_masses=None,
             bin_borders=bin_borders,
         )
@@ -311,76 +311,13 @@ class HistogramCRPS(ProbabilisticMethod, nn.Module):
     def get_logscore_at_y(self, batch_y, pred_params):
         return get_logscore_at_y_PL(
             batch_y,
-            all_quantiles=None,
+            cdf_at_borders=None,
             bin_masses=pred_params,
             bin_borders=self.bin_borders.reshape(1, -1),
         )
 
     def loss(self, batch_y, pred_params):
-        N, Y = batch_y.shape
-        assert pred_params.shape[0] in [1, N]
-        assert pred_params.shape[1] == self.B
-        bin_borders = self.bin_borders.reshape(1, -1)
-        bin_widths = self.bin_widths.reshape(1, -1)
-        cdf_at_borders = torch.cat(
-            (
-                torch.zeros((N, 1), device=batch_y.device),
-                torch.cumsum(pred_params, dim=1),
-            ),
-            dim=1,
-        )  # (N, B+1)
-
-        # Compute parts
-        parts = (
-            (cdf_at_borders[:, :-1] + cdf_at_borders[:, 1:]) / 2 * (bin_widths)
-        )  # (N, B)
-        sq_parts = (
-            -1
-            / 3
-            * (
-                cdf_at_borders[:, :-1] ** 2
-                + cdf_at_borders[:, :-1] * cdf_at_borders[:, 1:]
-                + cdf_at_borders[:, 1:] ** 2
-            )
-            * (-bin_widths)
-        )  # (N, B)
-
-        # first part of the loss
-        p1 = bin_borders[:, -1] - batch_y  # (N, Y)
-        # second part of the loss
-        p2 = torch.sum(sq_parts, dim=1)
-
-        # Find the bin index for each y
-        purek = torch.searchsorted(bin_borders, batch_y) - 1  # (N, Y)
-        k = torch.clamp(purek, 0, self.B - 1).squeeze()  # (N,) or (N, Y)
-
-        cdf_at_borderk = cdf_at_borders[torch.arange(N), k].view(N, -1)  # (N, Y)
-        cdf_at_borderkp1 = cdf_at_borders[torch.arange(N), k + 1].view(N, -1)  # (N, Y)
-        bin_widths_k = bin_widths[torch.arange(N), k].view(N, -1)  # (N, Y)
-        cdf_at_y = cdf_at_borderk + (
-            (
-                (batch_y - bin_borders[torch.arange(N), k].view(N, -1))  # (N, Y)
-                * (cdf_at_borderkp1 - cdf_at_borderk)
-                / (bin_widths_k + 1e-45)
-            )
-            * (1 * (0 < bin_widths_k))
-        )  # (N, Y)
-
-        p3 = (
-            (cdf_at_y + cdf_at_borderkp1)
-            / 2
-            * (bin_borders[torch.arange(N), k + 1].view(N, -1) - batch_y)
-        ) * ((bin_borders[:, 0] - batch_y < 0) * (batch_y < bin_borders[:, -1])).float()
-        mask = torch.arange(self.B, device=batch_y.device)[None, None, :] > purek.view(
-            N, Y, 1
-        )  # (N, Y, B)
-        p4 = torch.sum(parts.view(N, 1, self.B) * mask, dim=2) * (
-            (batch_y - bin_borders[:, -1] < 0)
-        )
-
-        crps = torch.abs(p1) + p2 - 2 * (p3 + p4)
-
-        return crps
+        return get_crps_PL(batch_y, cdf_at_borders=None, bin_masses=pred_params, bin_borders=self.bin_borders.reshape(1, self.B+1)).mean()
 
     def is_PL(self) -> bool:
         return True
@@ -391,38 +328,13 @@ class HistogramCRPS(ProbabilisticMethod, nn.Module):
         return masses
 
 
-def get_logscore_at_y_PL(batch_y, all_quantiles, bin_masses, bin_borders):
-    assert (bin_masses is None and all_quantiles is not None) or (
-        bin_masses is not None and all_quantiles is None
-    )
-    N, Y = batch_y.shape
-    assert (all_quantiles is None and bin_masses.shape[0] in [1, N]) or (
-        bin_masses is None and all_quantiles.shape[0] in [1, N]
-    )
-    assert bin_borders.shape[0] in [1, N]
-    assert bin_borders.shape[1] == (
-        all_quantiles.shape[1] if all_quantiles is not None else bin_masses.shape[1] + 1
-    )
-    B = all_quantiles.shape[1] - 1 if all_quantiles is not None else bin_masses.shape[1]
-    # the log score of a histogram is the neg log of the pdf
-    # the pdf is the mass of the bin divided by the bin width
-    if bin_masses is None:
-        bin_masses = all_quantiles[:, 1:] - all_quantiles[:, :-1]  # (1N, B)
-    bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (1N, B)
-    bin_densities = bin_masses / bin_widths  # (1N, B)
-    y_bin = torch.clamp(
-        torch.searchsorted(bin_borders.squeeze(), batch_y) - 1, 0, B - 1
-    )  # here we squeeze bin borders because when it has leading shape N it's fine, but when it has leading shape 1 it's not (we need to make it 1d in that case)
-    # reshape and compute
-    bin_densities = bin_densities.reshape(N, B, 1)  # (N, 1, B)
-    y_bin = y_bin.reshape(N, 1, y_bin.shape[1])  # (N, 1, Y)
-    log_score = -(
-        torch.log(bin_densities + 1e-45) * (y_bin == torch.arange(B).reshape(1, B, 1))
-    ).sum(dim=1)
-    return log_score
+def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
+    # reshape inputs and return shapes too. Returns:
+    # batch_y (N, Y)
+    # cdf_at_borders (N, B+1)
+    # bin_masses (N, B)
+    # bin_borders (N, B+1)
 
-
-def get_F_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     assert (bin_masses is None and cdf_at_borders is not None) or (
         bin_masses is not None and cdf_at_borders is None
     )
@@ -451,11 +363,40 @@ def get_F_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
             dim=1,
         )  # (N, B+1)
     else:
-        cdf_at_borders = cdf_at_borders.expand(N, B + 1)
+        cdf_at_borders = cdf_at_borders.expand(N, B + 1).contiguous()
+        bin_masses = cdf_at_borders[:, 1:] - cdf_at_borders[:, :-1]  # (N, B)
     bin_borders = bin_borders.expand(N, B + 1).contiguous()
     assert N > 1  # to ensure squeeze is irrelevant
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+    return N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths
 
+
+def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
+    N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths = (
+        handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders)
+    )
+    # the log score of a histogram is the neg log of the pdf
+    # the pdf is the mass of the bin divided by the bin width
+    if bin_masses is None:
+        bin_masses = cdf_at_borders[:, 1:] - cdf_at_borders[:, :-1]  # (1N, B)
+    bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (1N, B)
+    bin_densities = bin_masses / bin_widths  # (1N, B)
+    y_bin = torch.clamp(
+        torch.searchsorted(bin_borders.squeeze(), batch_y) - 1, 0, B - 1
+    )  # here we squeeze bin borders because when it has leading shape N it's fine, but when it has leading shape 1 it's not (we need to make it 1d in that case)
+    # reshape and compute
+    bin_densities = bin_densities.reshape(N, B, 1)  # (N, 1, B)
+    y_bin = y_bin.reshape(N, 1, y_bin.shape[1])  # (N, 1, Y)
+    log_score = -(
+        torch.log(bin_densities + 1e-45) * (y_bin == torch.arange(B).reshape(1, B, 1))
+    ).sum(dim=1)
+    return log_score
+
+
+def get_F_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
+    N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths = (
+        handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders)
+    )
     # bin index for each y
     k = torch.clamp(
         torch.searchsorted(bin_borders, batch_y) - 1, 0, B - 1
@@ -470,6 +411,92 @@ def get_F_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
         * (1 * (0 < bin_widths[torch.arange(N), k].view(N, -1)))
     )
     return cdf_at_y
+
+
+def get_crps_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
+    # the idea is that we compute the crps for a flexible input
+    # batch_y is (N, Y)
+    # cdf_at_borders is (N, B+1) or (1, B+1)
+    # bin_masses is (N, B) or (1, B)
+    # bin_borders is (N, B+1) or (1, B+1)
+    # the output should always be (N, Y)
+    # what we are computing is (in latex):
+
+    # A = b_B-y
+    # B = \sum_{i=1}^{i=B} \int_{b_{i-1}}^{b_i} F(y')^2dy' (`int_Fysquared_bis.sum(dim=1)`)
+    # C = \int_{y}^{b_k} F(y')dy'                          (`int_Fy_bis` masked and summed)
+    # D = \sum_{i=k+1}^{i=B} \int_{b_{i-1}}^{b_{i}} F(y')dy'
+
+    # crps = A + B - 2 * (C + D)             when b_0 < y < b_B
+    # crps = -A + B                          when b_B < y (note that abs(A) = -A in this case and abs(A) = A in the other two cases)
+    # crps = A + B - 2 * D_                  when y < b_0  (D_ = `int_Fy_bis.sum(dim=1)`)
+
+    # crps = abs(A) + B - 2 * (C + D) * (1*(y < b_B)))  (with careful treatment of C and D)
+
+    N, Y, B, batch_y, cdf_at_borders, bin_masses, bin_borders, bin_widths = (
+        handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders)
+    )  # batch_y is (N, Y) and the other are (N, B(+1))
+    assert (
+        bin_borders == torch.sort(bin_borders, dim=1)[0]
+    ).all(), "bin borders must be ordered"
+    assert (bin_widths >= 0).all(), "bin borders must be ordered"
+
+    # Compute A
+    partA = torch.abs(bin_borders[:, -1:] - batch_y)  # (N, Y)
+    # Compute B
+    int_Fysquared_bis = (
+        -1
+        / 3
+        * (
+            cdf_at_borders[:, :-1] ** 2
+            + cdf_at_borders[:, :-1] * cdf_at_borders[:, 1:]
+            + cdf_at_borders[:, 1:] ** 2
+        )
+        * (-bin_widths)
+    )  # (N, B)
+    partB = int_Fysquared_bis.sum(1, keepdims=True)  # (N, 1)
+
+    # Compute C and D
+    int_Fy_bis = (
+        (cdf_at_borders[:, :-1] + cdf_at_borders[:, 1:]) / 2 * (bin_widths)
+    )  # (N, B)
+    # Find the bin index for each y
+    purekm1 = (
+        torch.searchsorted(bin_borders, batch_y) - 1
+    )  # (N, Y)  (starts with 0 (unless y < b_0) and contains the index of the bin y is included in)
+    # note that k-1 is the index of the bin that ends at b_k
+    km1 = torch.clamp(purekm1, 0, B - 1).squeeze()  # (N,) or (N, Y)
+
+    cdf_at_borderkm1 = cdf_at_borders[torch.arange(N), km1].view(N, -1)  # (N, Y)
+    cdf_at_borderk = cdf_at_borders[torch.arange(N), km1 + 1].view(N, -1)  # (N, Y)
+    bin_widths_km1 = bin_widths.expand(N, B)[torch.arange(N), km1].view(
+        N, -1
+    )  # (N, Y)  width of interval [b_km1, b_k] where y is included
+    cdf_at_y = cdf_at_borderkm1 + (
+        (
+            (batch_y - bin_borders[torch.arange(N), km1].view(N, -1))  # (N, Y)
+            * (cdf_at_borderk - cdf_at_borderkm1)
+            / (bin_widths_km1 + 1e-45)
+        )
+        * (1 * (0 < bin_widths_km1))
+    )  # (N, Y)
+
+    partC = (
+        (cdf_at_y + cdf_at_borderk)  # (N, Y)
+        / 2
+        * (bin_borders[torch.arange(N), km1 + 1].view(N, -1) - batch_y)
+    ) * (
+        (bin_borders[:, 0:1] < batch_y)
+    ).float()  # non-zero if b_0 < y < b_B
+    mask = torch.arange(B, device=batch_y.device).reshape(1, 1, B) > purekm1.view(
+        N, Y, 1
+    )  # (N, Y, B)
+    partD = torch.sum(int_Fy_bis.view(N, 1, B) * mask, dim=2)  # (N, Y, B)  # (N, Y)
+
+    crps = (
+        partA + partB - 2 * (partC + partD) * (batch_y < bin_borders[:, -1:])
+    )  # (N, Y)
+    return crps
 
 
 def test_laplace():
@@ -659,5 +686,7 @@ def get_method(method_name):
         return CategoricalCrossEntropy
     elif method_name == "pinball":
         return PinballLoss
+    elif method_name == "crpshist":
+        return HistogramCRPS
     else:
         raise ValueError(f"Unknown method name {method_name}")
