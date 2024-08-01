@@ -286,13 +286,13 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         return self.model(batch_x)
 
 
-class HistogramCRPS(ProbabilisticMethod, nn.Module):
+class CRPSHist(ProbabilisticMethod, nn.Module):
     def __init__(self, layer_sizes, bin_borders, **kwargs):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
         """
-        super(HistogramCRPS, self).__init__()
+        super(CRPSHist, self).__init__()
         self.B = len(bin_borders) - 1
         self.bin_borders = torch.tensor(bin_borders)
         self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
@@ -326,6 +326,88 @@ class HistogramCRPS(ProbabilisticMethod, nn.Module):
         logits = self.model(batch_x)
         masses = nn.functional.softmax(logits, dim=1)
         return masses
+
+class CRPSQR(ProbabilisticMethod, nn.Module):
+    def __init__(self, layer_sizes, quantile_levels, bounds, predict_residuals=False, **kwargs):
+        """
+        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
+        It does not include the last layer.
+        """
+        super(CRPSQR, self).__init__()
+        self.quantile_levels = torch.sort(torch.tensor(quantile_levels))[0]
+        assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
+        assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
+        self.lower, self.upper = bounds
+        self.quantile_levels = torch.concatenate(
+            (torch.tensor([0]), self.quantile_levels, torch.tensor([1]))
+        )
+        self.B = len(self.quantile_levels) - 1
+        self.model = MLP(layer_sizes + [len(quantile_levels)], **kwargs)
+        self.predict_residuals = predict_residuals
+
+    def get_F_at_y(self, batch_y, pred_params):
+        N, Q = pred_params.shape  # Q = number of quantiles
+        bin_borders = torch.concatenate(
+            (
+                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
+                pred_params,
+                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
+            ),
+            dim=1,
+        )
+        return get_F_at_y_PL(
+            batch_y,
+            cdf_at_borders=self.quantile_levels.reshape(1, -1),
+            bin_masses=None,
+            bin_borders=bin_borders,
+        )
+
+    def get_logscore_at_y(self, batch_y, pred_params):
+        N = batch_y.shape[0]
+        bin_borders = torch.concatenate(
+            (
+                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
+                pred_params,
+                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
+            ),
+            dim=1,
+        )
+        return get_logscore_at_y_PL(
+            batch_y,
+            cdf_at_borders=self.quantile_levels.reshape(1, -1),
+            bin_masses=None,
+            bin_borders=bin_borders,
+        )
+
+    def loss(self, batch_y, pred_params):
+        N = batch_y.shape[0]
+        bin_borders = torch.concatenate(
+            (
+                torch.tensor(self.lower).reshape(1, 1).expand(N, 1),
+                pred_params,
+                torch.tensor(self.upper).reshape(1, 1).expand(N, 1),
+            ),
+            dim=1,
+        )
+        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+        if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
+            return (-bin_widths * (bin_widths < 0)).sum()
+        else:
+            return get_crps_PL(batch_y, self.quantile_levels.reshape(1,-1), bin_masses=None, bin_borders=bin_borders).mean()
+
+    def is_PL(self) -> bool:
+        return True
+
+    def forward(self, batch_x):
+        out = self.model(batch_x)
+        if self.predict_residuals:
+            residuals = torch.concatenate((out[:, :1], nn.functional.softplus(out[:, 1:])), dim=1)
+            out = torch.cumsum(residuals, dim=1)
+        return out
+            
+
+
+
 
 
 def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
@@ -687,6 +769,8 @@ def get_method(method_name):
     elif method_name == "pinball":
         return PinballLoss
     elif method_name == "crpshist":
-        return HistogramCRPS
+        return CRPSHist
+    elif method_name == "crpsqr":
+        return CRPSQR
     else:
         raise ValueError(f"Unknown method name {method_name}")
