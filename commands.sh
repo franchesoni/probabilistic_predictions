@@ -11,8 +11,8 @@ do
         python run.py laplacescore --dataset_name=$DATASET --seeds=$SEED &
         python run.py mdn --dataset_name=$DATASET --method_kwargss="[{n_components: 3}, {n_components: 10}]" --seeds=$SEED &
         python run.py iqn --dataset_name=$DATASET --seeds=$SEED &
+        wait
     done
-    wait
     echo "Finished seed $SEED"
 done
 
