@@ -31,7 +31,6 @@ def hparams_iterator(**kwargs):
         yield dict(zip(keys, combination))
 
 
-
 def main(
     method_name,
     method_kwargss=dict(),
@@ -75,105 +74,32 @@ def main(
         lr=lrs,
         method_kwargs=method_kwargss,
     ):
-        seed = hparams["seed"]
-        model_size = hparams["model_size"]
-        beta = hparams["beta"]
-        lr = hparams["lr"]
-        method_kwargs = hparams["method_kwargs"]
-
-        if model_size == "base":
-            hidden_dim = 128
-            hidden_layers = 2
-        elif model_size == "small":
-            hidden_dim = 64
-            hidden_layers = 1
-        elif model_size == "large":
-            hidden_dim = 512
-            hidden_layers = 4
-        else:
-            raise ValueError(f"Unknown model size: {model_size}")
-
-        torch.manual_seed(seed)
-        model = get_method(method_name)(
-            [trainds.get_feature_dim(), *([hidden_dim] * hidden_layers)],
-            **method_kwargs,
-        ).to(DEVICE)
-        optimizer = schedulefree.AdamWScheduleFree(
-            model.parameters(),
-            lr=lr,
-            warmup_steps=int(steps * 0.05),
-            betas=(beta, 0.999),
-        )
-
-        print("=" * 30)
-        str_to_log += f"\n\nTraining {method_name} on {dataset_name} with {steps} steps and hparams {hparams}"
-        print(
-            f"Training {method_name} on {dataset_name} with {steps} steps and hparams {hparams}"
-        )
-        loss_curve = []
-        model.train()
-        optimizer.train()
-        step = 0
-        st = time()
-        while True:
-            for x, y in traindl:
-                x, y = x.to(DEVICE), y.to(DEVICE)
-                x = x.reshape(x.shape[0], -1).float()
-                y = y.reshape(y.shape[0], -1)
-                optimizer.zero_grad()
-                pred = model(x)
-                loss = model.loss(y, pred)
-                loss.backward()
-                optimizer.step()
-                loss_curve.append(loss.item())
-
-                step += 1
-                print(f"Step {step}/{steps}, Loss {loss}", end="\r")
-                end_training = step >= steps or (time() - st) > max_time_per_run
-                if end_training:
-                    break
-            if end_training:
-                break
-
-        if hasattr(model, "global_width") and not model.train_width:
-            model.global_width.data = torch.tensor(
-                [mean(loss_curve[-steps // 20 :])]
-            ).to(DEVICE)
-        (
-            val_alphas,
-            val_alphas_ranks,
-            ece,
-            meanvalloss,
-            meanvallogscores,
-            meanvalcrpss,
-        ) = evaluate(valdl, model, optimizer)
-
-        print(f"Validation Loss: {meanvalloss}")
-        print(f"Validation Logscore: {meanvallogscores}")
-        print(f"Validation CRPS: {meanvalcrpss}")
-        print(f"Validation ECE: {ece}")
-        str_to_log += (
-            f"\nValidation Loss: {meanvalloss}"
-            + f"\nValidation Logscore: {meanvallogscores}"
-            + f"\nValidation CRPS: {meanvalcrpss}"
-            + f"\nValidation ECE: {ece}"
-        )
-
-        # now check if the model is better, if it is, save it
-        if select_by == "crps":
-            score = meanvalcrpss
-        elif select_by == "logscore":
-            score = meanvallogscores
-        else:
-            raise ValueError(f"Unknown select_by: {select_by}")
-        if score < best_score:
-            best_hparams = hparams
-            best_state_dict = model.state_dict()
-            dstdir.mkdir(parents=True, exist_ok=True)
-            torch.save(best_state_dict, dstdir / "best_model.pth")
-            with open(dstdir / "best_hparams.txt", "w") as f:
-                f.write(str(best_hparams))
-            best_score = score
+        try:
+            (
+                hidden_dim,
+                hidden_layers,
+                optimizer,
+                loss_curve,
+                best_hparams,
+                str_to_log,
+                best_score,
+            ) = train_and_validate(
+                method_name,
+                dataset_name,
+                steps,
+                max_time_per_run,
+                select_by,
+                dstdir,
+                str_to_log,
+                trainds,
+                traindl,
+                valdl,
+                best_score,
+                hparams,
+            )
+        except Exception as e:
+            print(f"Error with hparams {hparams}: {e}")
+            str_to_log += f"\nError with hparams {hparams}: {e}"
 
     print("*" * 40)
     # now load the best model
@@ -307,6 +233,130 @@ def main(
     print("*" * 40)
 
 
+def train_and_validate(
+    method_name,
+    dataset_name,
+    steps,
+    max_time_per_run,
+    select_by,
+    dstdir,
+    str_to_log,
+    trainds,
+    traindl,
+    valdl,
+    best_score,
+    hparams,
+):
+    seed = hparams["seed"]
+    model_size = hparams["model_size"]
+    beta = hparams["beta"]
+    lr = hparams["lr"]
+    method_kwargs = hparams["method_kwargs"]
+
+    if model_size == "base":
+        hidden_dim = 128
+        hidden_layers = 2
+    elif model_size == "small":
+        hidden_dim = 64
+        hidden_layers = 1
+    elif model_size == "large":
+        hidden_dim = 512
+        hidden_layers = 4
+    else:
+        raise ValueError(f"Unknown model size: {model_size}")
+
+    torch.manual_seed(seed)
+    model = get_method(method_name)(
+        [trainds.get_feature_dim(), *([hidden_dim] * hidden_layers)],
+        **method_kwargs,
+    ).to(DEVICE)
+    optimizer = schedulefree.AdamWScheduleFree(
+        model.parameters(),
+        lr=lr,
+        warmup_steps=int(steps * 0.05),
+        betas=(beta, 0.999),
+    )
+
+    print("=" * 30)
+    str_to_log += f"\n\nTraining {method_name} on {dataset_name} with {steps} steps and hparams {hparams}"
+    print(
+        f"Training {method_name} on {dataset_name} with {steps} steps and hparams {hparams}"
+    )
+    loss_curve = []
+    model.train()
+    optimizer.train()
+    step = 0
+    st = time()
+    while True:
+        for x, y in traindl:
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            x = x.reshape(x.shape[0], -1).float()
+            y = y.reshape(y.shape[0], -1)
+            optimizer.zero_grad()
+            pred = model(x)
+            loss = model.loss(y, pred)
+            loss.backward()
+            optimizer.step()
+            loss_curve.append(loss.item())
+
+            step += 1
+            print(f"Step {step}/{steps}, Loss {loss}", end="\r")
+            end_training = step >= steps or (time() - st) > max_time_per_run
+            if end_training:
+                break
+        if end_training:
+            break
+
+    if hasattr(model, "global_width") and not model.train_width:
+        model.global_width.data = torch.tensor([mean(loss_curve[-steps // 20 :])]).to(
+            DEVICE
+        )
+    (
+        val_alphas,
+        val_alphas_ranks,
+        ece,
+        meanvalloss,
+        meanvallogscores,
+        meanvalcrpss,
+    ) = evaluate(valdl, model, optimizer)
+
+    print(f"Validation Loss: {meanvalloss}")
+    print(f"Validation Logscore: {meanvallogscores}")
+    print(f"Validation CRPS: {meanvalcrpss}")
+    print(f"Validation ECE: {ece}")
+    str_to_log += (
+        f"\nValidation Loss: {meanvalloss}"
+        + f"\nValidation Logscore: {meanvallogscores}"
+        + f"\nValidation CRPS: {meanvalcrpss}"
+        + f"\nValidation ECE: {ece}"
+    )
+
+    # now check if the model is better, if it is, save it
+    if select_by == "crps":
+        score = meanvalcrpss
+    elif select_by == "logscore":
+        score = meanvallogscores
+    else:
+        raise ValueError(f"Unknown select_by: {select_by}")
+    if score < best_score:
+        best_hparams = hparams
+        best_state_dict = model.state_dict()
+        dstdir.mkdir(parents=True, exist_ok=True)
+        torch.save(best_state_dict, dstdir / "best_model.pth")
+        with open(dstdir / "best_hparams.txt", "w") as f:
+            f.write(str(best_hparams))
+        best_score = score
+    return (
+        hidden_dim,
+        hidden_layers,
+        optimizer,
+        loss_curve,
+        best_hparams,
+        str_to_log,
+        best_score,
+    )
+
+
 def evaluate(dataloader, model, optimizer):
     model.eval()
     optimizer.eval()
@@ -342,7 +392,9 @@ def evaluate(dataloader, model, optimizer):
         ece = mean((torch.abs(alphas - alphas_ranks / len(alphas))).cpu().numpy())
         meanvalloss = mean(losses)
         logscoresf = torch.stack(logscores).view(-1)
-        assert torch.isnan(logscoresf).sum() / len(logscoresf) < 0.1, f"{torch.isnan(logscoresf).sum() / len(logscoresf)} of logscores are nan" 
+        assert (
+            torch.isnan(logscoresf).sum() / len(logscoresf) < 0.1
+        ), f"{torch.isnan(logscoresf).sum() / len(logscoresf)} of logscores are nan"
         meanvallogscores = mean(logscores)
         meanvalcrpss = mean(crpss)
     return alphas, alphas_ranks, ece, meanvalloss, meanvallogscores, meanvalcrpss
