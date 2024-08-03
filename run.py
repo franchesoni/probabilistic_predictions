@@ -1,6 +1,6 @@
 import torch
 from itertools import product
-from numpy import mean, ceil
+from numpy import nanmean as mean, ceil, isnan
 from time import strftime, time
 from pathlib import Path
 import schedulefree
@@ -341,6 +341,8 @@ def evaluate(dataloader, model, optimizer):
         ).float()
         ece = mean((torch.abs(alphas - alphas_ranks / len(alphas))).cpu().numpy())
         meanvalloss = mean(losses)
+        logscoresf = torch.stack(logscores).view(-1)
+        assert torch.isnan(logscoresf).sum() / len(logscoresf) < 0.1, f"{torch.isnan(logscoresf).sum() / len(logscoresf)} of logscores are nan" 
         meanvallogscores = mean(logscores)
         meanvalcrpss = mean(crpss)
     return alphas, alphas_ranks, ece, meanvalloss, meanvallogscores, meanvalcrpss
