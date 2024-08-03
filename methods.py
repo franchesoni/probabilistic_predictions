@@ -508,6 +508,7 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     # cdf_at_borders (N, B+1)
     # bin_masses (N, B)
     # bin_borders (N, B+1)
+    assert not (torch.isnan(batch_y).any() or (torch.isnan(cdf_at_borders).any() if cdf_at_borders is not None else False) or (torch.isnan(bin_masses).any() if bin_masses is not None else False) or torch.isnan(bin_borders).any()), "NaN in input"
 
     assert (bin_masses is None and cdf_at_borders is not None) or (
         bin_masses is not None and cdf_at_borders is None
@@ -545,7 +546,7 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
     assert torch.isclose(cdf_at_borders[0, 0], torch.tensor(0.0)) and torch.isclose(
         cdf_at_borders[-1, -1], torch.tensor(1.0)
-    ), f"CDF is at borders {cdf_at_borders[0, 0]} {cdf_at_borders[-1, -1]} but should be 0 and 1"
+    ), f"CDF at borders is {cdf_at_borders[0, 0]} and {cdf_at_borders[-1, -1]} but should be 0 and 1"
     bin_borders = bin_borders.contiguous()
     # send all tensors to the right device
     cdf_at_borders, bin_masses, bin_borders, bin_widths = (
