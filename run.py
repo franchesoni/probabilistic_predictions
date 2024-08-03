@@ -66,7 +66,8 @@ def main(
         testds, batch_size=test_batch_size, shuffle=False
     )
 
-    best_score = 1e9
+    torch.autograd.set_detect_anomaly(True)
+    best_score, best_hparams = 1e9, None
     for hparams in hparams_iterator(
         seed=seeds,
         model_size=model_sizes,
@@ -96,6 +97,7 @@ def main(
                 valdl,
                 best_score,
                 hparams,
+                best_hparams,
             )
         except Exception as e:
             print(f"Error with hparams {hparams}: {e}")
@@ -246,6 +248,7 @@ def train_and_validate(
     valdl,
     best_score,
     hparams,
+    best_hparams,
 ):
     seed = hparams["seed"]
     model_size = hparams["model_size"]
