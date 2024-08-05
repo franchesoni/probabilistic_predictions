@@ -122,12 +122,12 @@ def train(
 ):
     # utils
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter(log_dir="monocular")
+    writer = SummaryWriter(log_dir="runs_monocular")
     # model
     model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
     model = model.to(device)
     # data
-    train_ds = Scenenet(root="train/0")
+    train_ds = Scenenet(root="/export/home/data/monocular/train/0")
     torch_dl = torch.utils.data.DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -137,7 +137,7 @@ def train(
         drop_last=True,
     )
     dl = PrefetchLoader(torch_dl, gpu_transform, device=device)
-    val_ds = Scenenet(root="train/1", sample_every=1000)
+    val_ds = Scenenet(root="/export/home/data/monocular/train/2", sample_every=1000)
     val_dl = PrefetchLoader(
         torch.utils.data.DataLoader(
             val_ds,
@@ -176,7 +176,10 @@ def train(
             global_step += 1
 
             if global_step % val_every == 0:  # maybe validate
-                val_scores = validate(dl, val_dl, model, optim)
+                val_scores, vis_imgs, vis_out, vis_target = validate(dl, val_dl, model, optim)
+                cv2.imwrite(f"monocular/vis_imgs.png", vis_imgs)
+                cv2.imwrite(f"monocular/vis_target.png", vis_target)
+                cv2.imwrite(f"monocular/vis_out_{global_step}.png", vis_out)
                 for score_name, score_value in val_scores.items():
                     writer.add_scalar(f"val/{score_name}", score_value, global_step)
                 print(f"step={global_step}, validation scores: {val_scores}")
@@ -208,12 +211,45 @@ def validate(train_dl, val_dl, model, optim):
             scores["l1"] += torch.nn.functional.l1_loss(
                 out, invdepths
             )  # add mean over batch
+        # show 8 images
+        vis_imgs = (
+            torch.concatenate(
+                list(imgs[:8].permute(0, 2, 3, 1).add(0.5).mul(255)), dim=1
+            )
+            .to(torch.uint8)
+            .cpu()
+            .numpy()[..., ::-1]
+        )  # RGB
+        vis_out = (
+            torch.concatenate(
+                list(
+                    (out[:8, 0] / out[:8, 0].max(dim=2)[0].max(dim=1)[0][:, None, None])
+                    .mul(255)
+                    .to(torch.uint8)
+                ),
+                dim=1,
+            )
+            .cpu()
+            .numpy()
+        )
+        vis_target = (
+            torch.concatenate(
+                list(
+                    (invdepths[:8, 0] / invdepths[:8, 0].max(dim=2)[0].max(dim=1)[0][
+                        :, None, None
+                    ]
+                )
+                .mul(255)
+                .to(torch.uint8)
+            ),
+            dim=1,
+        ).cpu().numpy())
         scores = {k: v / len(val_dl) for k, v in scores.items()}
     print("done validating.", end="/r")
     # schedulefree setup
     model.train()
     optim.train()
-    return scores
+    return scores, vis_imgs, vis_out, vis_target
 
 
 if __name__ == "__main__":
