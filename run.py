@@ -381,11 +381,6 @@ def evaluate(dataloader, model, optimizer):
             alphas_targets.append(
                 torch.concatenate((model.get_F_at_y(target, pred), target), dim=1).cpu()
             )
-            # if model.is_PL():
-            #     try:
-            #         closed_crps = get_crps_PL(target, **model.prepare_params(pred))
-            #     except AssertionError as e:
-            #         print(e)
         alphas_targets = torch.cat(alphas_targets, dim=0)  # (N, 2)
         alphas = alphas_targets[:, 0].float()
         alphas_ranks = torch.empty_like(alphas)

@@ -34,10 +34,6 @@ class ProbabilisticMethod(ABC):
     def loss(self, batch_y, pred_params):
         pass
 
-    @abstractmethod
-    def is_PL(self) -> bool:
-        pass
-
     def forward(self, batch_x):
         pass
 
@@ -80,9 +76,6 @@ class LaplaceLogScore(ProbabilisticMethod, nn.Module):
     def loss(self, batch_y, pred_params):
         return self.get_logscore_at_y(batch_y, pred_params).sum()
 
-    def is_PL(self) -> bool:
-        return False
-
     def forward(self, batch_x):
         params = self.model(batch_x)  # logits
         mu, blogits = params[:, 0], params[:, 1]
@@ -119,9 +112,6 @@ class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
 
     def loss(self, batch_y, pred_params):
         return self.get_logscore_at_y(batch_y, pred_params).sum()
-
-    def is_PL(self) -> bool:
-        return False
 
     def forward(self, batch_x):
         return self.model(batch_x)
@@ -185,9 +175,6 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
     def loss(self, batch_y, pred_params):
         return self.get_logscore_at_y(batch_y, pred_params).sum()
 
-    def is_PL(self) -> bool:
-        return False
-
     def forward(self, batch_x):
         params = self.model(batch_x)  # logits
         pis, mus, sigmas = (
@@ -229,9 +216,6 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
 
     def loss(self, batch_y, pred_params):
         return self.get_logscore_at_y(batch_y, pred_params).sum()
-
-    def is_PL(self) -> bool:
-        return True
 
     def forward(self, batch_x):
         logits = self.model(batch_x)
@@ -299,9 +283,6 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         )
         return pinball.sum(dim=1).mean()
 
-    def is_PL(self) -> bool:
-        return True
-
     def forward(self, batch_x):
         return self.model(batch_x)
 
@@ -335,9 +316,6 @@ class CRPSHist(ProbabilisticMethod, nn.Module):
 
     def loss(self, batch_y, pred_params):
         return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
-
-    def is_PL(self) -> bool:
-        return True
 
     def forward(self, batch_x):
         logits = self.model(batch_x)
@@ -401,9 +379,6 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         else:
             return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
 
-    def is_PL(self) -> bool:
-        return True
-
     def forward(self, batch_x):
         out = self.model(batch_x)
         if self.predict_residuals:
@@ -454,9 +429,6 @@ class IQN(ProbabilisticMethod, nn.Module):
             batch_y.unsqueeze(1) - quantiles
         )  # (N, n_taus, Y)
         return pinball.sum(dim=1).mean()
-
-    def is_PL(self) -> bool:
-        return False
 
     def prepare_params(self, batch_y, pred_params):
         batch_y = batch_y.contiguous()
