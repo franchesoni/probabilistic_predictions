@@ -1,5 +1,6 @@
 from pathlib import Path
 from functools import partial
+import pickle
 import itertools
 from contextlib import suppress
 import time
@@ -12,14 +13,19 @@ from schedulefree import AdamWScheduleFree
 
 from methods import get_method
 
+# debug util
+def bp():
+    import ipdb
+    ipdb.set_trace()
 
 def fast_collate(batch):
     """A fast collation function optimized for uint8 images (np array or torch) and int64 targets (labels)"""
     batch_size = len(batch)
     imgs = torch.zeros((batch_size, *batch[0][0].shape), dtype=torch.uint8)
+    depths = torch.zeros((batch_size, *batch[0][1].shape), dtype=torch.int64)
     for i in range(batch_size):
         imgs[i] += torch.from_numpy(batch[i][0])
-    depths = torch.stack([torch.from_numpy(batch[i][1]) for i in range(batch_size)])
+        depths[i] += torch.from_numpy(batch[i][1])
     return imgs, depths
 
 
@@ -85,8 +91,16 @@ class Scenenet(torch.utils.data.Dataset):
     def __init__(self, root, sample_every=1):
         self.root = Path(root)
         print("Loading Scenet from", self.root)
-        self.images = sorted(list(self.root.glob("**/photo/*.jpg")))
-        self.depths = sorted(list(self.root.glob("**/depth/*.png")))
+
+        if Path(f"datacache_{self.root.name}.pkl").exists():
+            with open(f"datacache_{self.root.name}.pkl", "rb") as f:
+                self.images, self.depths = pickle.load(f)
+        else:
+            self.images = sorted(list(self.root.glob("**/photo/*.jpg")))
+            self.depths = sorted(list(self.root.glob("**/depth/*.png")))
+            with open(f"datacache_{self.root.name}.pkl", "wb") as f:
+                pickle.dump((self.images, self.depths), f)
+
         if sample_every > 1:
             self.images = self.images[::sample_every]
             self.depths = self.depths[::sample_every]
@@ -97,7 +111,7 @@ class Scenenet(torch.utils.data.Dataset):
         imgpath, depthpath = self.images[index], self.depths[index]
         img, depth = cv2.imread(str(imgpath)), cv2.imread(
             str(depthpath), cv2.IMREAD_UNCHANGED
-        )  # read in BGR, the network doesn't care
+        ).astype(int)  # read in BGR, the network doesn't care
         return img, depth
 
     def __len__(self):
@@ -107,7 +121,7 @@ class Scenenet(torch.utils.data.Dataset):
 def gpu_transform(img, depth):
     # we take the images to [-0.5, 0.5] and we use the normalized log depth as target
     img, logdepth = img.float().div(255).sub(0.5), torch.log(
-        depth
+        1+depth
     )  # [-0.5, 0.5], [0, 10]
     img, logdepth = img.permute(0, 3, 1, 2), logdepth.unsqueeze(1)  # (B, C, H, W)
     img, logdepth = torch.nn.functional.interpolate(
@@ -124,12 +138,12 @@ def gpu_transform(img, depth):
 
 
 def train(
-    max_seconds=3600,
+    max_seconds=1800,
     batch_size=64,
     lr=1e-4,
     beta=0.9,
-    warmup_steps=1000,
-    val_every=1000,
+    warmup_steps=500,
+    val_every=200,
     weight_decay=0.001,
     num_workers=96,
     embedding_dim=512,
@@ -312,8 +326,8 @@ if __name__ == "__main__":
     # python monocular.py --method_name=laplacewb --max_seconds=60 --val_every=50
     # python monocular.py --method_name=laplacescore --max_seconds=60 --val_every=50
     # python monocular.py --method_name=mdn --max_seconds=60 --val_every=50 --method_kwargs="{n_components: 3}"
-    # python monocular.py --method_name=pinball --method_kwargs="{n_quantile_levels: 128, bounds: (0., 1.)}"
-    # python monocular.py --method_name=crpsqr --method_kwargs="{n_quantile_levels: 128, bounds: (0., 1.)}"
-    # python monocular.py --method_name=ce --method_kwargs="{n_bins: 128}"
-    # python monocular.py --method_name=crpshist --method_kwargs="{n_bins: 128}"
+    # python monocular.py --method_name=pinball --method_kwargs="{n_quantile_levels: 128, bounds: (-5., 5.)}"
+    # python monocular.py --method_name=crpsqr --method_kwargs="{n_quantile_levels: 128, bounds: (-5., 5.)}"
+    # python monocular.py --method_name=ce --method_kwargs="{n_bins: 128, bounds: (-5., 5.)}"
+    # python monocular.py --method_name=crpshist --method_kwargs="{n_bins: 128, bounds: (-5., 5.)}"
     # python monocular.py --method_name=iqn 
