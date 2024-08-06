@@ -16,6 +16,14 @@ class MLP(nn.Module):
             if i < len(layer_sizes) - 2:
                 layers.append(activation_fn())
         self.network = nn.Sequential(*layers)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for module in self.network:
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=1e-5)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
 
     def forward(self, x):
         return self.network(x)
@@ -898,6 +906,16 @@ def test_all():
 if __name__ == "__main__":
     test_all()
 
+method_names = [
+    "laplacescore",
+    "laplacewb",
+    "mdn",
+    "ce",
+    "pinball",
+    "crpshist",
+    "crpsqr",
+    "iqn",
+]
 
 def get_method(method_name):
     if method_name == "laplacescore":
