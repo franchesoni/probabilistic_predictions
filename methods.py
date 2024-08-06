@@ -45,16 +45,25 @@ class ProbabilisticMethod(ABC):
     def forward(self, batch_x):
         pass
 
-    def get_numerical_CRPS(self, batch_y, pred_params, lower, upper, count, divide=False):
+    def get_numerical_CRPS(
+        self, batch_y, pred_params, lower, upper, count, divide=False
+    ):
         assert batch_y.shape[1] == 1
         dys = torch.linspace(lower, upper, count)
 
         if divide:
             # we do it ten points at a time to avoid memory issues
-            for i in range(0, len(dys), 10):  # (0, 10, 20, ..., ((count-1)//10)*10) < count
-                ten_points = dys[i:i+10]
+            for i in range(
+                0, len(dys), 10
+            ):  # (0, 10, 20, ..., ((count-1)//10)*10) < count
+                ten_points = dys[i : i + 10]
                 crps = self.get_numerical_CRPS(
-                    batch_y, pred_params, ten_points[0], ten_points[1], len(ten_points), divide=False
+                    batch_y,
+                    pred_params,
+                    ten_points[0],
+                    ten_points[1],
+                    len(ten_points),
+                    divide=False,
                 )
                 if i == 0:
                     out = crps
@@ -62,10 +71,8 @@ class ProbabilisticMethod(ABC):
                     out += crps
             return out
 
-        dys = (dys
-            .reshape(1, count)
-            .expand(pred_params.shape[0], count)
-            .to(batch_y.device)
+        dys = (
+            dys.reshape(1, count).expand(pred_params.shape[0], count).to(batch_y.device)
         )
         Fy = self.get_F_at_y(dys, pred_params)  # (N, count)
         heaviside = 1 * (batch_y <= dys)  # (N, count)
@@ -96,7 +103,9 @@ class LaplaceLogScore(ProbabilisticMethod, nn.Module):
         return torch.log(2 * bs) + torch.abs(mus - batch_y) / bs
 
     def loss(self, batch_y, pred_params):
-        return self.get_logscore_at_y(batch_y, pred_params).mean()  # we should use sum but the mean has more deceent magnitude
+        return self.get_logscore_at_y(
+            batch_y, pred_params
+        ).mean()  # we should use sum but the mean has more deceent magnitude
 
     def forward(self, batch_x):
         params = self.model(batch_x)  # logits
@@ -133,7 +142,9 @@ class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
         return out
 
     def loss(self, batch_y, pred_params):
-        return self.get_logscore_at_y(batch_y, pred_params).mean()  # sum should be preferred if not for scale
+        return self.get_logscore_at_y(
+            batch_y, pred_params
+        ).mean()  # sum should be preferred if not for scale
 
     def forward(self, batch_x):
         return self.model(batch_x)
@@ -254,7 +265,7 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         """
         super(PinballLoss, self).__init__()
         quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1]
-        self.quantile_levels = torch.sort(torch.tensor(quantile_levels))[0]
+        self.quantile_levels = torch.sort(quantile_levels)[0]
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
         self.lower, self.upper = bounds
@@ -357,8 +368,8 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         It does not include the last layer.
         """
         super(CRPSQR, self).__init__()
-        quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1] 
-        self.quantile_levels = torch.sort(torch.tensor(quantile_levels))[0]
+        quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1]
+        self.quantile_levels = torch.sort(quantile_levels)[0]
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
         self.lower, self.upper = bounds
@@ -506,7 +517,12 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     # cdf_at_borders (N, B+1)
     # bin_masses (N, B)
     # bin_borders (N, B+1)
-    assert not (torch.isnan(batch_y).any() or (torch.isnan(cdf_at_borders).any() if cdf_at_borders is not None else False) or (torch.isnan(bin_masses).any() if bin_masses is not None else False) or torch.isnan(bin_borders).any()), "NaN in input"
+    assert not (
+        torch.isnan(batch_y).any()
+        or (torch.isnan(cdf_at_borders).any() if cdf_at_borders is not None else False)
+        or (torch.isnan(bin_masses).any() if bin_masses is not None else False)
+        or torch.isnan(bin_borders).any()
+    ), "NaN in input"
 
     assert (bin_masses is None and cdf_at_borders is not None) or (
         bin_masses is not None and cdf_at_borders is None
@@ -566,6 +582,7 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
         bin_masses = cdf_at_borders[:, 1:] - cdf_at_borders[:, :-1]  # (1N, B)
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (1N, B)
     bin_densities = bin_masses / bin_widths  # (1N, B)
+    bin_densities[torch.isinf(bin_densities)] = 0
     y_bin = torch.clamp(
         torch.searchsorted(
             (
@@ -580,12 +597,12 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
         B - 1,
     )  # here we squeeze bin borders because when it has leading shape N it's fine, but when it has leading shape 1 it's not (we need to make it 1d in that case)
     # reshape and compute
-    bin_densities = bin_densities.reshape(N, B, 1)  # (N, 1, B)
+    bin_densities = bin_densities.reshape(N, B, 1)
     y_bin = y_bin.reshape(N, 1, y_bin.shape[1])  # (N, 1, Y)
     log_score = -(
         torch.log(bin_densities + 1e-45)
         * (y_bin == torch.arange(B, device=batch_y.device).reshape(1, B, 1))
-    ).sum(dim=1)
+    ).mean(dim=1)
     return log_score
 
 
@@ -934,6 +951,7 @@ method_names = [
     "crpsqr",
     "iqn",
 ]
+
 
 def get_method(method_name):
     if method_name == "laplacescore":
