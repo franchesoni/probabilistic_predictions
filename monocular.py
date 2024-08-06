@@ -7,7 +7,10 @@ import time
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import cv2
+from numpy import nanmean as mean
 from schedulefree import AdamWScheduleFree
+
+from methods import get_method
 
 
 def fast_collate(batch):
@@ -102,30 +105,55 @@ class Scenenet(torch.utils.data.Dataset):
 
 
 def gpu_transform(img, depth):
-    img, invdepth = img.float().div(255).sub(0.5), 1 / (1 + depth.float())
-    img, invdepth = img.permute(0, 3, 1, 2), invdepth.unsqueeze(1)  # (B, C, H, W)
-    img, invdepth = torch.nn.functional.interpolate(
+    # we take the images to [-0.5, 0.5] and we use the normalized log depth as target
+    img, logdepth = img.float().div(255).sub(0.5), torch.log(
+        depth
+    )  # [-0.5, 0.5], [0, 10]
+    img, logdepth = img.permute(0, 3, 1, 2), logdepth.unsqueeze(1)  # (B, C, H, W)
+    img, logdepth = torch.nn.functional.interpolate(
         img, size=(256, 256), mode="bilinear"
-    ), torch.nn.functional.interpolate(invdepth, size=(256, 256), mode="bilinear")
-    return img, invdepth
+    ), torch.nn.functional.interpolate(logdepth, size=(256, 256), mode="bilinear")
+    B = img.shape[0]
+    logdepth = logdepth - torch.median(logdepth.view(B, -1), dim=1)[0].view(
+        B, 1, 1, 1
+    )  # center the depth
+    logdepth = logdepth / torch.mean(logdepth.abs().view(B, -1), dim=1).view(
+        B, 1, 1, 1
+    )  # normalize the depth
+    return img, logdepth
 
 
 def train(
     max_seconds=3600,
-    batch_size=32,
+    batch_size=64,
     lr=1e-4,
     beta=0.9,
     warmup_steps=1000,
-    val_every=100,
+    val_every=1000,
     weight_decay=0.001,
     num_workers=96,
+    embedding_dim=512,
+    method_name="laplacewb",
+    method_kwargs={},
+    seed=0,
 ):
     # utils
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.autograd.set_detect_anomaly(True)
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter(log_dir="runs_monocular")
+    writer = SummaryWriter(comment=f"{method_name}")
     # model
     model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
+    model.scratch.output_conv[4] = torch.nn.Conv2d(
+        32, embedding_dim, kernel_size=(1, 1), stride=(1, 1)
+    )  # this last layer is the one that outputs the depth, we will make it output a big vector instead
+    method = get_method(method_name)(layer_sizes=[512], **method_kwargs)
     model = model.to(device)
+    method = method.to(device)
     # data
     train_ds = Scenenet(root="/export/home/data/monocular/train/0")
     torch_dl = torch.utils.data.DataLoader(
@@ -137,7 +165,7 @@ def train(
         drop_last=True,
     )
     dl = PrefetchLoader(torch_dl, gpu_transform, device=device)
-    val_ds = Scenenet(root="/export/home/data/monocular/train/2", sample_every=1000)
+    val_ds = Scenenet(root="/export/home/data/monocular/train/1", sample_every=1000)
     val_dl = PrefetchLoader(
         torch.utils.data.DataLoader(
             val_ds,
@@ -151,9 +179,8 @@ def train(
         device=device,
     )
     # optim
-    loss_fn = torch.nn.functional.l1_loss
     optim = AdamWScheduleFree(
-        model.parameters(),
+        list(model.parameters()) + list(method.parameters()),
         lr=lr,
         betas=(beta, 0.999),
         weight_decay=weight_decay,
@@ -161,25 +188,29 @@ def train(
     )
 
     model.train()
+    method.train()
     optim.train()
 
     st = time.time()
     global_step = 0
     while not (time.time() - st > max_seconds):
-        for imgs, invdepths in dl:
-            out = model(imgs).unsqueeze(
-                1
-            )  # (B, 1, H, W), I don't know why it's not already 4D (has no channel dim)
-            loss = loss_fn(out, invdepths)
+        for imgs, logdepths in dl:
+
+            embeddings = model(imgs)  # (B, E, H, W)
+            embeddings = embeddings.permute(0, 2, 3, 1).reshape(
+                -1, embedding_dim
+            )  # (BHW, E)
+            params = method(embeddings)  # (BHW, P)
+            loss = method.loss(logdepths.reshape(-1, 1), params)
             loss.backward()
             optim.step()
-            global_step += 1
 
             if global_step % val_every == 0:  # maybe validate
-                val_scores, vis_imgs, vis_out, vis_target = validate(dl, val_dl, model, optim)
-                cv2.imwrite(f"monocular/vis_imgs.png", vis_imgs)
-                cv2.imwrite(f"monocular/vis_target.png", vis_target)
-                cv2.imwrite(f"monocular/vis_out_{global_step}.png", vis_out)
+                val_scores, vis_imgs, vis_target = validate(
+                    dl, val_dl, model, method, optim
+                )
+                cv2.imwrite(f"imgs/vis_imgs.png", vis_imgs)
+                cv2.imwrite(f"imgs/vis_target.png", vis_target)
                 for score_name, score_value in val_scores.items():
                     writer.add_scalar(f"val/{score_name}", score_value, global_step)
                 print(f"step={global_step}, validation scores: {val_scores}")
@@ -189,28 +220,55 @@ def train(
             writer.add_scalar("train/speed", speed, global_step)
             writer.add_scalar("train/loss", loss.item(), global_step)
             print(
-                f"speed={speed:.2f}(steps/s), time={int(time_so_far)}(s), loss={loss.item():.3g}",
+                f"time={int(time_so_far)}(s), steps={global_step}, speed={speed:.2f}(steps/s), loss={loss.item():.3g}",
                 end="\r",
             )
+            global_step += 1
 
 
-def validate(train_dl, val_dl, model, optim):
+def validate(train_dl, val_dl, model, method, optim):
     print("validating...", end="/r")
     # schedulefree setup
     model.train()
+    method.train()
     optim.eval()
     with torch.no_grad():
-        for imgs, invdepths in itertools.islice(train_dl, 50):
-            model(imgs)
+        # for imgs, logdepths in itertools.islice(train_dl, 2):  # debug
+        for imgs, logdepths in itertools.islice(train_dl, 50):
+            embeddings = model(imgs)
+            embeddings = embeddings.permute(0, 2, 3, 1).reshape(
+                -1, embeddings.shape[1]
+            )  # (BHW, E)
+            method(embeddings)
     model.eval()
+    method.eval()
     # validation
     with torch.no_grad():
-        scores = {"l1": 0}
-        for imgs, invdepths in val_dl:
-            out = model(imgs).unsqueeze(1)
-            scores["l1"] += torch.nn.functional.l1_loss(
-                out, invdepths
-            )  # add mean over batch
+        scores = {"logscore": [], "crps": []}
+        for imgs, logdepths in val_dl:
+            embeddings = model(imgs)  # (B, E, H, W)
+            B, E, H, W = embeddings.shape
+            embeddings = embeddings.permute(0, 2, 3, 1).reshape(B * H * W, E)
+            params = method(embeddings)  # (BHW, P)
+            targets = logdepths.reshape(B * H * W, 1)
+            scores["logscore"].append(method.get_logscore_at_y(targets, params).cpu())
+            target_range = targets.max() - targets.min()
+
+            scores["crps"].append(
+                mean(
+                    method.get_numerical_CRPS(
+                        targets,
+                        params,
+                        lower=targets.min() - target_range * 0.05,
+                        upper=targets.max() + target_range * 0.05,
+                        count=1000,
+                        divide=True,
+                    ).cpu()
+                )
+            )
+        scores["logscore"] = mean(scores["logscore"])
+        scores["crps"] = mean(scores["crps"])
+
         # show 8 images
         vis_imgs = (
             torch.concatenate(
@@ -220,39 +278,42 @@ def validate(train_dl, val_dl, model, optim):
             .cpu()
             .numpy()[..., ::-1]
         )  # RGB
-        vis_out = (
+        def norm_tensor(x):
+            # this function is for tensors of shape (B, H, W)
+            maxs, mins = (
+                x.max(dim=2)[0].max(dim=1)[0][:, None, None],
+                x.min(dim=2)[0].min(dim=1)[0][:, None, None],
+            )
+            return (x - mins) / (maxs - mins)
+
+        vis_target = (
             torch.concatenate(
-                list(
-                    (out[:8, 0] / out[:8, 0].max(dim=2)[0].max(dim=1)[0][:, None, None])
-                    .mul(255)
-                    .to(torch.uint8)
-                ),
+                list(norm_tensor(logdepths[:8, 0]).mul(255).to(torch.uint8)),
                 dim=1,
             )
             .cpu()
             .numpy()
         )
-        vis_target = (
-            torch.concatenate(
-                list(
-                    (invdepths[:8, 0] / invdepths[:8, 0].max(dim=2)[0].max(dim=1)[0][
-                        :, None, None
-                    ]
-                )
-                .mul(255)
-                .to(torch.uint8)
-            ),
-            dim=1,
-        ).cpu().numpy())
         scores = {k: v / len(val_dl) for k, v in scores.items()}
     print("done validating.", end="/r")
     # schedulefree setup
     model.train()
+    method.train()
     optim.train()
-    return scores, vis_imgs, vis_out, vis_target
+    return scores, vis_imgs, vis_target
 
 
 if __name__ == "__main__":
     from fire import Fire
 
     Fire(train)
+    
+    # commands 
+    # python monocular.py --method_name=laplacewb --max_seconds=60 --val_every=50
+    # python monocular.py --method_name=laplacescore --max_seconds=60 --val_every=50
+    # python monocular.py --method_name=mdn --max_seconds=60 --val_every=50 --method_kwargs="{n_components: 3}"
+    # python monocular.py --method_name=pinball --method_kwargs="{n_quantile_levels: 128, bounds: (0., 1.)}"
+    # python monocular.py --method_name=crpsqr --method_kwargs="{n_quantile_levels: 128, bounds: (0., 1.)}"
+    # python monocular.py --method_name=ce --method_kwargs="{n_bins: 128}"
+    # python monocular.py --method_name=crpshist --method_kwargs="{n_bins: 128}"
+    # python monocular.py --method_name=iqn 
