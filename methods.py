@@ -45,10 +45,24 @@ class ProbabilisticMethod(ABC):
     def forward(self, batch_x):
         pass
 
-    def get_numerical_CRPS(self, batch_y, pred_params, lower, upper, count):
+    def get_numerical_CRPS(self, batch_y, pred_params, lower, upper, count, divide=False):
         assert batch_y.shape[1] == 1
-        dys = (
-            torch.linspace(lower, upper, count)
+        dys = torch.linspace(lower, upper, count)
+
+        if divide:
+            # we do it ten points at a time to avoid memory issues
+            for i in range(0, len(dys), 10):  # (0, 10, 20, ..., ((count-1)//10)*10) < count
+                ten_points = dys[i:i+10]
+                crps = self.get_numerical_CRPS(
+                    batch_y, pred_params, ten_points[0], ten_points[1], len(ten_points), divide=False
+                )
+                if i == 0:
+                    out = crps
+                else:
+                    out += crps
+            return out
+
+        dys = (dys
             .reshape(1, count)
             .expand(pred_params.shape[0], count)
             .to(batch_y.device)
@@ -82,7 +96,7 @@ class LaplaceLogScore(ProbabilisticMethod, nn.Module):
         return torch.log(2 * bs) + torch.abs(mus - batch_y) / bs
 
     def loss(self, batch_y, pred_params):
-        return self.get_logscore_at_y(batch_y, pred_params).sum()
+        return self.get_logscore_at_y(batch_y, pred_params).mean()  # we should use sum but the mean has more deceent magnitude
 
     def forward(self, batch_x):
         params = self.model(batch_x)  # logits
@@ -119,7 +133,7 @@ class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
         return out
 
     def loss(self, batch_y, pred_params):
-        return self.get_logscore_at_y(batch_y, pred_params).sum()
+        return self.get_logscore_at_y(batch_y, pred_params).mean()  # sum should be preferred if not for scale
 
     def forward(self, batch_x):
         return self.model(batch_x)
