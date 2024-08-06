@@ -210,12 +210,13 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
 
 
 class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, bin_borders, **kwargs):
+    def __init__(self, layer_sizes, n_bins, bounds, **kwargs):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
         """
         super(CategoricalCrossEntropy, self).__init__()
+        bin_borders = torch.linspace(bounds[0], bounds[1], n_bins + 1)
         self.B = len(bin_borders) - 1
         self.bin_borders = torch.tensor(bin_borders)
         self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
@@ -246,12 +247,13 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
 
 
 class PinballLoss(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, quantile_levels, bounds, **kwargs):
+    def __init__(self, layer_sizes, n_quantile_levels, bounds, **kwargs):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
         """
         super(PinballLoss, self).__init__()
+        quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1]
         self.quantile_levels = torch.sort(torch.tensor(quantile_levels))[0]
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
@@ -310,12 +312,13 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
 
 
 class CRPSHist(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, bin_borders, **kwargs):
+    def __init__(self, layer_sizes, n_bins, **kwargs):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
         """
         super(CRPSHist, self).__init__()
+        bin_borders = torch.linspace(0, 1, n_bins + 1)
         self.B = len(bin_borders) - 1
         self.bin_borders = torch.tensor(bin_borders)
         self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
@@ -347,13 +350,14 @@ class CRPSHist(ProbabilisticMethod, nn.Module):
 
 class CRPSQR(ProbabilisticMethod, nn.Module):
     def __init__(
-        self, layer_sizes, quantile_levels, bounds, predict_residuals=False, **kwargs
+        self, layer_sizes, n_quantile_levels, bounds, predict_residuals=False, **kwargs
     ):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
         """
         super(CRPSQR, self).__init__()
+        quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1] 
         self.quantile_levels = torch.sort(torch.tensor(quantile_levels))[0]
         assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
         assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
@@ -412,7 +416,7 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
 
 
 class IQN(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, cos_n=64, **kwargs):
+    def __init__(self, layer_sizes, n_layers_h=3, cos_n=64, **kwargs):
         # here we init the iqn, which is composed by h and phi. These are separate networks.
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
@@ -422,7 +426,7 @@ class IQN(ProbabilisticMethod, nn.Module):
         embedding_dim = layer_sizes[-1]
         self.g = MLP(layer_sizes, **kwargs)
         self.h = MLP(
-            [embedding_dim] * 2 + [1]
+            [embedding_dim] * n_layers_h + [1]
         )  # just two layers as in https://github.com/BY571/IQN-and-Extensions/blob/master/IQN-DQN.ipynb
         self.cos_n = cos_n
         pis = torch.tensor([torch.pi * i for i in range(self.cos_n)]).view(
