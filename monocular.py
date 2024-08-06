@@ -13,10 +13,13 @@ from schedulefree import AdamWScheduleFree
 
 from methods import get_method
 
+
 # debug util
 def bp():
     import ipdb
+
     ipdb.set_trace()
+
 
 def fast_collate(batch):
     """A fast collation function optimized for uint8 images (np array or torch) and int64 targets (labels)"""
@@ -111,7 +114,9 @@ class Scenenet(torch.utils.data.Dataset):
         imgpath, depthpath = self.images[index], self.depths[index]
         img, depth = cv2.imread(str(imgpath)), cv2.imread(
             str(depthpath), cv2.IMREAD_UNCHANGED
-        ).astype(int)  # read in BGR, the network doesn't care
+        ).astype(
+            int
+        )  # read in BGR, the network doesn't care
         return img, depth
 
     def __len__(self):
@@ -121,7 +126,7 @@ class Scenenet(torch.utils.data.Dataset):
 def gpu_transform(img, depth):
     # we take the images to [-0.5, 0.5] and we use the normalized log depth as target
     img, logdepth = img.float().div(255).sub(0.5), torch.log(
-        1+depth
+        1 + depth
     )  # [-0.5, 0.5], [0, 10]
     img, logdepth = img.permute(0, 3, 1, 2), logdepth.unsqueeze(1)  # (B, C, H, W)
     img, logdepth = torch.nn.functional.interpolate(
@@ -267,7 +272,6 @@ def validate(train_dl, val_dl, model, method, optim):
             targets = logdepths.reshape(B * H * W, 1)
             scores["logscore"].append(method.get_logscore_at_y(targets, params).cpu())
             target_range = targets.max() - targets.min()
-
             scores["crps"].append(
                 mean(
                     method.get_numerical_CRPS(
@@ -292,6 +296,7 @@ def validate(train_dl, val_dl, model, method, optim):
             .cpu()
             .numpy()[..., ::-1]
         )  # RGB
+
         def norm_tensor(x):
             # this function is for tensors of shape (B, H, W)
             maxs, mins = (
@@ -321,13 +326,13 @@ if __name__ == "__main__":
     from fire import Fire
 
     Fire(train)
-    
-    # commands 
-    # python monocular.py --method_name=laplacewb --max_seconds=60 --val_every=50
-    # python monocular.py --method_name=laplacescore --max_seconds=60 --val_every=50
-    # python monocular.py --method_name=mdn --max_seconds=60 --val_every=50 --method_kwargs="{n_components: 3}"
+
+    # commands
+    # python monocular.py --method_name=laplacewb
+    # python monocular.py --method_name=laplacescore
+    # python monocular.py --method_name=mdn --method_kwargs="{n_components: 3}"
     # python monocular.py --method_name=pinball --method_kwargs="{n_quantile_levels: 128, bounds: (-5., 5.)}"
     # python monocular.py --method_name=crpsqr --method_kwargs="{n_quantile_levels: 128, bounds: (-5., 5.)}"
     # python monocular.py --method_name=ce --method_kwargs="{n_bins: 128, bounds: (-5., 5.)}"
     # python monocular.py --method_name=crpshist --method_kwargs="{n_bins: 128, bounds: (-5., 5.)}"
-    # python monocular.py --method_name=iqn 
+    # python monocular.py --method_name=iqn
