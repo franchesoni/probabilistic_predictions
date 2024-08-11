@@ -52,17 +52,19 @@ class ProbabilisticMethod(ABC):
         dys = torch.linspace(lower, upper, count)
 
         if divide:
+            print("running with divide", divide, "-" * 10)
             # we do it ten points at a time to avoid memory issues
             for i in range(
-                0, len(dys), 10
+                0, len(dys), divide
             ):  # (0, 10, 20, ..., ((count-1)//10)*10) < count
-                ten_points = dys[i : i + 10]
+                print(f"getting numerical crps {i}...")
+                divided_points = dys[i : i + divide]
                 crps = self.get_numerical_CRPS(
                     batch_y,
                     pred_params,
-                    ten_points[0],
-                    ten_points[1],
-                    len(ten_points),
+                    divided_points[0],
+                    divided_points[1],
+                    len(divided_points),
                     divide=False,
                 )
                 if i == 0:
@@ -206,7 +208,7 @@ class MixtureDensityNetwork(ProbabilisticMethod, nn.Module):
         return neg_log_likelihood
 
     def loss(self, batch_y, pred_params):
-        return self.get_logscore_at_y(batch_y, pred_params).sum()
+        return self.get_logscore_at_y(batch_y, pred_params).mean()
 
     def forward(self, batch_x):
         params = self.model(batch_x)  # logits
@@ -227,9 +229,8 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
         It does not include the last layer.
         """
         super(CategoricalCrossEntropy, self).__init__()
-        bin_borders = torch.linspace(bounds[0], bounds[1], n_bins + 1)
-        self.B = len(bin_borders) - 1
-        self.bin_borders = torch.tensor(bin_borders)
+        self.bin_borders = torch.linspace(bounds[0], bounds[1], n_bins + 1)
+        self.B = len(self.bin_borders) - 1
         self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
         assert self.bin_widths.min() > 0, "Bin borders must be strictly increasing"
         self.model = MLP(layer_sizes + [self.B], **kwargs)
@@ -323,15 +324,15 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
 
 
 class CRPSHist(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, n_bins, **kwargs):
+    def __init__(self, layer_sizes, n_bins, bounds, **kwargs):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
         """
         super(CRPSHist, self).__init__()
-        bin_borders = torch.linspace(0, 1, n_bins + 1)
+        bin_borders = torch.linspace(bounds[0], bounds[1], n_bins + 1)
         self.B = len(bin_borders) - 1
-        self.bin_borders = torch.tensor(bin_borders)
+        self.bin_borders = bin_borders
         self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
         assert self.bin_widths.min() > 0, "Bin borders must be strictly increasing"
         self.model = MLP(layer_sizes + [self.B], **kwargs)
@@ -395,7 +396,7 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
                 self.upper.reshape(1, 1).expand(N, 1),
             ),
             dim=1,
-        )
+        )  # (N, B+1)
         return dict(
             cdf_at_borders=cdf_at_borders,
             bin_masses=bin_masses,
@@ -403,10 +404,14 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
         )
 
     def get_F_at_y(self, batch_y, pred_params):
-        return get_F_at_y_PL(batch_y, **self.prepare_params(pred_params))
+        kwparams = self.prepare_params(pred_params)
+        kwparams["bin_borders"] = torch.sort(kwparams["bin_borders"], dim=1)[0]
+        return get_F_at_y_PL(batch_y, **kwparams)
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        return get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params))
+        kwparams = self.prepare_params(pred_params)
+        kwparams["bin_borders"] = torch.sort(kwparams["bin_borders"], dim=1)[0]
+        return get_logscore_at_y_PL(batch_y, **kwparams)
 
     def loss(self, batch_y, pred_params):
         bin_borders = self.prepare_params(pred_params)["bin_borders"]
@@ -434,33 +439,40 @@ class IQN(ProbabilisticMethod, nn.Module):
         It does not include the last layer.
         """
         super(IQN, self).__init__()
-        embedding_dim = layer_sizes[-1]
+        self.embedding_dim = layer_sizes[-1]
         self.g = MLP(layer_sizes, **kwargs)
         self.h = MLP(
-            [embedding_dim] * n_layers_h + [1]
+            [self.embedding_dim] * n_layers_h + [1]
         )  # just two layers as in https://github.com/BY571/IQN-and-Extensions/blob/master/IQN-DQN.ipynb
         self.cos_n = cos_n
         pis = torch.tensor([torch.pi * i for i in range(self.cos_n)]).view(
-            1, 1, self.cos_n
+            1, self.cos_n
         )
         self.register_buffer("pis", pis)
-        self.cos_embed = nn.Linear(self.cos_n, embedding_dim)
+        self.cos_embed = nn.Linear(self.cos_n, self.embedding_dim)
 
     def sample_taus(self, batch_size, n_taus=8):
         taus = torch.rand(batch_size, n_taus).unsqueeze(2)  # (N, n_taus, 1)
         return taus
 
     def get_tau_embedding(self, taus):
-        # taus must be (N, n_taus, 1)
-        return nn.functional.relu(self.cos_embed(torch.cos(taus * self.pis)))
+        # taus must be (N, n_taus, Y)
+        taus_shape = taus.shape
+        taus = taus.reshape(-1, 1)  # (N*n_taus*Y, 1)
+        return nn.functional.relu(
+            self.cos_embed(torch.cos(taus * self.pis).view(-1, self.cos_n))
+        ).view(*taus_shape, self.embedding_dim)
 
     def forward(self, batch_x):
         return self.g(batch_x)  # (N, embedding_dim)
 
     def loss(self, batch_y, pred_params):
+        # pred_params is (N, D)
         N, Y = batch_y.shape
         taus = self.sample_taus(batch_y.shape[0]).to(batch_y.device)  # (N, n_taus, 1)
-        tau_embedding = self.get_tau_embedding(taus)  # (N, n_taus, embedding_dim)
+        tau_embedding = self.get_tau_embedding(taus)  # (N, n_taus, 1, embedding_dim)
+        assert tau_embedding.shape[2] == 1
+        tau_embedding = tau_embedding.squeeze(2)  # (N, n_taus, embedding_dim)
         quantiles = self.h(tau_embedding * pred_params.unsqueeze(1))  # (N, n_taus, 1)
         pinball = (taus - 1 * (batch_y.unsqueeze(1) < quantiles)) * (
             batch_y.unsqueeze(1) - quantiles
@@ -474,7 +486,60 @@ class IQN(ProbabilisticMethod, nn.Module):
         pred_params = pred_params.expand(N, D)  # (N, D)
         return N, Y, D, batch_y, pred_params
 
-    def get_dist(self, batch_y, pred_params, tau_samples=2001):
+    def get_dist(self, batch_y, pred_params, samples_per_step=8, num_steps=4):
+        N, Y, D, batch_y, pred_params = self.prepare_params(batch_y, pred_params)
+
+        def quantile_fn(taus):
+            tau_embedding = self.get_tau_embedding(taus)  # (N, n_taus, Y, E)
+            return self.h(tau_embedding * pred_params[:, None, None]).squeeze(-1)
+
+        def search_step(lower_taus, upper_taus, y_values):
+            taus = (
+                torch.linspace(0, 1, samples_per_step)
+                .reshape(1, samples_per_step, 1)
+                .expand(N, samples_per_step, 1)
+                .to(batch_y.device)
+            )  # (N, samples_per_step, 1)
+            taus = (
+                lower_taus + (upper_taus - lower_taus) * taus
+            )  # (N, samples_per_step, Y)
+            quantiles = quantile_fn(taus)  # (N, samples_per_step, Y)
+            right_indices = torch.searchsorted(
+                quantiles.permute(0, 2, 1), y_values.unsqueeze(2)
+            )  # (N, Y, 1)
+            left_indices = right_indices - 1
+            right_indices, left_indices = right_indices.squeeze(2).unsqueeze(
+                1
+            ), left_indices.squeeze(2).unsqueeze(
+                1
+            )  # (N, 1, Y)
+            right_indices, left_indices = right_indices.expand(
+                N, samples_per_step, Y
+            ), left_indices.expand(
+                N, samples_per_step, Y
+            )  # (N, samples_per_step, Y)
+            new_upper_taus = torch.gather(
+                taus, 1, torch.clamp(right_indices, max=samples_per_step - 1)
+            )
+            new_upper_taus[right_indices > samples_per_step - 1] = 1
+            new_lower_taus = torch.gather(taus, 1, torch.clamp(left_indices, min=0))
+            new_lower_taus[left_indices < 0] = 0
+            return new_lower_taus, new_upper_taus
+
+        # Initial bounds
+        lower_taus = torch.zeros((N, 1, Y)).to(batch_y.device)
+        upper_taus = torch.ones((N, 1, Y)).to(batch_y.device)
+
+        # Perform search steps
+        for _ in range(num_steps):
+            lower_taus, upper_taus = search_step(lower_taus, upper_taus, batch_y)
+
+        F_at_y = (lower_taus + upper_taus) / 2
+        f_at_y = 1 / ((upper_taus - lower_taus) * Y)
+
+        return F_at_y, f_at_y
+
+    def get_dist2(self, batch_y, pred_params, tau_samples=2001):
         # batch_y is (N, Y)
         # pred_params is (N, D)
         # for each y we need to find the tau that gives the quantile
