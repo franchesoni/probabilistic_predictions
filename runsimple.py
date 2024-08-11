@@ -114,8 +114,11 @@ def main(
             x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
             optimizer.zero_grad()
             pred = model(x)
+            pred.retain_grad()  # debug
             loss = model.loss(y, pred)
             loss.backward()
+            writer.add_scalar("loop/pred_grad_norm", torch.norm(pred.grad).item(), global_step)
+
             optimizer.step()
             loss_value = loss.item()
 
