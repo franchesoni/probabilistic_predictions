@@ -3,16 +3,27 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 log2pi = torch.log(torch.tensor(2 * torch.pi))
 
 
 class MLP(nn.Module):
-    def __init__(self, layer_sizes: Sequence[int], activation_fn=nn.GELU):
+    def __init__(self, layer_sizes: Sequence[int], activation_fn=nn.GELU, dropout_p=0.0):
         super(MLP, self).__init__()
+        self.dropout_p = dropout_p
+        if self.dropout_p > 0:
+            self.mc_unet = True
+        else:
+            self.mc_unet = False
         layers = []
         for i in range(len(layer_sizes) - 1):
-            layers.append(nn.Linear(layer_sizes[i], layer_sizes[i + 1]))
+            layers.append(
+                F.dropout(
+                    nn.Linear(layer_sizes[i], layer_sizes[i + 1]),
+                    p=self.dropout_p,
+                    training=self.mc_unet)
+            )
             if i < len(layer_sizes) - 2:
                 layers.append(activation_fn())
         self.network = nn.Sequential(*layers)
@@ -374,6 +385,143 @@ class IQN(ProbabilisticMethod, nn.Module):
 
     def forward(self, batch_x):
         return self.g(batch_x)  # (N, embedding_dim)
+
+    def loss(self, batch_y, pred_params):
+        # pred_params is (N, D)
+        N, Y = batch_y.shape
+        taus = self.sample_taus(batch_y.shape[0]).to(batch_y.device)  # (N, n_taus, 1)
+        tau_embedding = self.get_tau_embedding(taus)  # (N, n_taus, 1, embedding_dim)
+        assert tau_embedding.shape[2] == 1
+        tau_embedding = tau_embedding.squeeze(2)  # (N, n_taus, embedding_dim)
+        quantiles = self.h(tau_embedding * pred_params.unsqueeze(1))  # (N, n_taus, 1)
+        pinball = (taus - 1 * (batch_y.unsqueeze(1) < quantiles)) * (
+            batch_y.unsqueeze(1) - quantiles
+        )  # (N, n_taus, Y)
+        return pinball.sum(dim=1).mean()
+
+    def prepare_params(self, batch_y, pred_params):
+        batch_y = batch_y.contiguous()
+        N, Y = batch_y.shape
+        D = pred_params.shape[1]
+        pred_params = pred_params.expand(N, D)  # (N, D)
+        return N, Y, D, batch_y, pred_params
+
+    def get_dist(self, batch_y, pred_params, samples_per_step=8, num_steps=4):
+        N, Y, D, batch_y, pred_params = self.prepare_params(batch_y, pred_params)
+
+        def quantile_fn(taus):
+            tau_embedding = self.get_tau_embedding(taus)  # (N, n_taus, Y, E)
+            return self.h(tau_embedding * pred_params[:, None, None]).squeeze(-1)
+
+        def search_step(lower_taus, upper_taus, y_values):
+            taus = (
+                torch.linspace(0, 1, samples_per_step)
+                .reshape(1, samples_per_step, 1)
+                .expand(N, samples_per_step, 1)
+                .to(batch_y.device)
+            )  # (N, samples_per_step, 1)
+            taus = (
+                lower_taus + (upper_taus - lower_taus) * taus
+            )  # (N, samples_per_step, Y)
+            quantiles = quantile_fn(taus)  # (N, samples_per_step, Y)
+            right_indices = torch.searchsorted(
+                quantiles.permute(0, 2, 1), y_values.unsqueeze(2)
+            )  # (N, Y, 1)
+            left_indices = right_indices - 1
+            right_indices, left_indices = right_indices.squeeze(2).unsqueeze(
+                1
+            ), left_indices.squeeze(2).unsqueeze(
+                1
+            )  # (N, 1, Y)
+            right_indices, left_indices = right_indices.expand(
+                N, samples_per_step, Y
+            ), left_indices.expand(
+                N, samples_per_step, Y
+            )  # (N, samples_per_step, Y)
+            new_upper_taus = torch.gather(
+                taus, 1, torch.clamp(right_indices, max=samples_per_step - 1)
+            )
+            new_upper_taus[right_indices > samples_per_step - 1] = 1
+            new_lower_taus = torch.gather(taus, 1, torch.clamp(left_indices, min=0))
+            new_lower_taus[left_indices < 0] = 0
+            return new_lower_taus, new_upper_taus
+
+        # Initial bounds
+        lower_taus = torch.zeros((N, 1, Y)).to(batch_y.device)
+        upper_taus = torch.ones((N, 1, Y)).to(batch_y.device)
+
+        # Perform search steps
+        for _ in range(num_steps):
+            lower_taus, upper_taus = search_step(lower_taus, upper_taus, batch_y)
+
+        F_at_y = (lower_taus + upper_taus) / 2
+        f_at_y = 1 / ((upper_taus - lower_taus) * Y)
+
+        return F_at_y, f_at_y
+
+    def get_dist2(self, batch_y, pred_params, tau_samples=2001):
+        # batch_y is (N, Y)
+        # pred_params is (N, D)
+        # for each y we need to find the tau that gives the quantile
+        # in other words we need to set the output to y and find the best tau. if we assume monotonicity this is a binary search.
+        N, Y, D, batch_y, pred_params = self.prepare_params(batch_y, pred_params)
+
+        def quantile_fn(taus):
+            tau_embedding = self.get_tau_embedding(
+                taus.unsqueeze(-1)
+            )  # (N, n_taus, embedding_dim)
+            return self.h(tau_embedding * pred_params.unsqueeze(1)).squeeze(
+                -1
+            )  # (N, n_taus)
+
+        sampled_taus = (
+            torch.linspace(0, 1, tau_samples).unsqueeze(0).expand(N, tau_samples)
+        ).to(
+            batch_y.device
+        )  # (N, initial_samples)
+        sampled_quantiles = quantile_fn(sampled_taus)  # (N, initial_samples)
+        right_taus = torch.searchsorted(sampled_quantiles, batch_y)  # (N, Y)
+        left_taus = right_taus - 1
+        right_taus, left_taus = right_taus / tau_samples, left_taus / tau_samples
+        F_at_y = (left_taus + right_taus) / 2
+        f_at_y = (right_taus - left_taus) / (
+            sampled_taus[0, 1] - sampled_taus[0, 0]
+        )  # (N, Y)
+        return F_at_y, f_at_y
+
+    def get_F_at_y(self, batch_y, pred_params):
+        return self.get_dist(batch_y, pred_params)[0]
+
+    def get_logscore_at_y(self, batch_y, pred_params):
+        return -torch.log(self.get_dist(batch_y, pred_params)[1])
+
+
+class MCD(ProbabilisticMethod, nn.Module):
+    def __init__(self, layer_sizes, dropout_p=0.5, **kwargs):
+        # here we init the iqn, which is composed by h and phi. These are separate networks.
+        """
+        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
+        It does not include the last layer.
+        """
+        super(MCD, self).__init__()
+        self.model = MLP(layer_sizes + [1], dropout_p=dropout_p, **kwargs)
+        self.mae_loss = nn.L1Loss()
+
+    def sample_taus(self, batch_size, n_taus=8):
+        taus = torch.rand(batch_size, n_taus).unsqueeze(2)  # (N, n_taus, 1)
+        return taus
+
+    def get_tau_embedding(self, taus):
+        # taus must be (N, n_taus, Y)
+        taus_shape = taus.shape
+        taus = taus.reshape(-1, 1)  # (N*n_taus*Y, 1)
+        return nn.functional.relu(
+            self.cos_embed(torch.cos(taus * self.pis).view(-1, self.cos_n))
+        ).view(*taus_shape, self.embedding_dim)
+
+    def forward(self, batch_x):
+        preds = self.model(batch_x)  # logits
+        return preds
 
     def loss(self, batch_y, pred_params):
         # pred_params is (N, D)
@@ -944,5 +1092,7 @@ def get_method(method_name):
         return CRPSQR
     elif method_name == "iqn":
         return IQN
+    elif method_name == "mcd":
+        return MCD
     else:
         raise ValueError(f"Unknown method name {method_name}")
