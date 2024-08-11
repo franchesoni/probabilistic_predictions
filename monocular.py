@@ -6,6 +6,7 @@ from contextlib import suppress
 import time
 
 import torch
+import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import cv2
 from numpy import nanmean as mean
@@ -141,6 +142,13 @@ def gpu_transform(img, depth):
     )  # normalize the depth
     return img, logdepth
 
+def seed_everything(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.autograd.set_detect_anomaly(True)
 
 def train(
     max_seconds=1800,
@@ -154,16 +162,14 @@ def train(
     embedding_dim=512,
     method_name="laplacewb",
     method_kwargs={},
-    seed=0,
+    seed=1,
+    dsfactor=8,
+    device="cuda:0"
 ):
     # utils
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    seed_everything(seed)
     torch.autograd.set_detect_anomaly(True)
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
     writer = SummaryWriter(comment=f"{method_name}")
     # model
     model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
@@ -214,17 +220,17 @@ def train(
     global_step = 0
     while not (time.time() - st > max_seconds):
         for imgs, logdepths in dl:
-
             embeddings = model(imgs)  # (B, E, H, W)
-            embeddings = embeddings.permute(0, 2, 3, 1).reshape(
-                -1, embedding_dim
-            )  # (BHW, E)
-            params = method(embeddings)  # (BHW, P)
-            loss = method.loss(logdepths.reshape(-1, 1), params)
+            embeddings, logdepths = reshape_downsample(embeddings, logdepths, dsfactor)
+            params = method(embeddings)  # (BHdsWds, P)
+            loss = method.loss(logdepths, params)
             loss.backward()
             optim.step()
+            loss_value = loss.item()
 
             if global_step % val_every == 0:  # maybe validate
+                del embeddings, params, loss
+                torch.cuda.empty_cache()
                 val_scores, vis_imgs, vis_target = validate(
                     dl, val_dl, model, method, optim
                 )
@@ -237,15 +243,44 @@ def train(
             time_so_far = time.time() - st
             speed = global_step / time_so_far
             writer.add_scalar("train/speed", speed, global_step)
-            writer.add_scalar("train/loss", loss.item(), global_step)
+            writer.add_scalar("train/loss", loss_value, global_step)
             print(
-                f"time={int(time_so_far)}(s), steps={global_step}, speed={speed:.2f}(steps/s), loss={loss.item():.3g}",
+                f"time={int(time_so_far)}(s), steps={global_step}, speed={speed:.2f}(steps/s), loss={loss_value:.3g}",
                 end="\r",
             )
             global_step += 1
+    # save the model
+    logdir = writer.log_dir
+    torch.save(model.state_dict(), f"{logdir}/model.pth")
 
 
-def validate(train_dl, val_dl, model, method, optim):
+def reshape_downsample(embeddings, logdepths, dsfactor):
+    # downsample and reshape
+    B, E, H, W = embeddings.shape
+    # Reshape embeddings and logdepths for easy indexing
+    embeddings = embeddings.reshape(B, E, H * W)  # Shape (B, E, H*W)
+    logdepths = logdepths.reshape(B, 1, H * W)  # Shape (B, H*W)
+    if dsfactor > 1:
+        # Calculate the number of samples to keep after downsampling
+        num_samples = H * W // (dsfactor**2)
+        # Generate random indices to shuffle the flattened spatial dimensions
+        random_indices = (
+            torch.rand(B, H * W, device=embeddings.device)
+            .argsort(dim=1)
+            .unsqueeze(1)[:, :, :num_samples]
+        )  # (B, 1, num_samples)
+
+        # Index into the embeddings and logdepths using random_indices
+        embeddings = torch.gather(
+            embeddings, dim=2, index=random_indices.expand(B, E, num_samples)
+        )
+        logdepths = torch.gather(logdepths, dim=2, index=random_indices)
+    embeddings = embeddings.permute(0, 2, 1).reshape(-1, E)  # (BHdsWds, E)
+    logdepths = logdepths.reshape(-1, 1)  # (BHdsWds, 1)
+    return embeddings, logdepths
+
+
+def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
     print("validating...", end="/r")
     # schedulefree setup
     model.train()
@@ -254,22 +289,21 @@ def validate(train_dl, val_dl, model, method, optim):
     with torch.no_grad():
         # for imgs, logdepths in itertools.islice(train_dl, 2):  # debug
         for imgs, logdepths in itertools.islice(train_dl, 50):
-            embeddings = model(imgs)
-            embeddings = embeddings.permute(0, 2, 3, 1).reshape(
-                -1, embeddings.shape[1]
-            )  # (BHW, E)
-            method(embeddings)
+            embeddings = model(imgs)  # (B, E, H, W)
+            embeddings, logdepths = reshape_downsample(embeddings, logdepths, dsfactor=val_dsfactor)
+            params = method(embeddings)  # (BHdsWds, P)
     model.eval()
     method.eval()
+
     # validation
     with torch.no_grad():
         scores = {"logscore": [], "crps": []}
-        for imgs, logdepths in val_dl:
+        print("validating...", end="\r")
+        seed_everything(0)
+        for imgs, logdepths in tqdm.tqdm(val_dl):
             embeddings = model(imgs)  # (B, E, H, W)
-            B, E, H, W = embeddings.shape
-            embeddings = embeddings.permute(0, 2, 3, 1).reshape(B * H * W, E)
-            params = method(embeddings)  # (BHW, P)
-            targets = logdepths.reshape(B * H * W, 1)
+            embeddings, targets = reshape_downsample(embeddings, logdepths, dsfactor=val_dsfactor)
+            params = method(embeddings)  # (BHdsWds, P)
             scores["logscore"].append(method.get_logscore_at_y(targets, params).cpu())
             target_range = targets.max() - targets.min()
             scores["crps"].append(
@@ -279,8 +313,8 @@ def validate(train_dl, val_dl, model, method, optim):
                         params,
                         lower=targets.min() - target_range * 0.05,
                         upper=targets.max() + target_range * 0.05,
-                        count=1000,
-                        divide=True,
+                        count=100,
+                        divide=False,
                     ).cpu()
                 )
             )
@@ -335,4 +369,5 @@ if __name__ == "__main__":
     # python monocular.py --method_name=crpsqr --method_kwargs="{n_quantile_levels: 128, bounds: (-5., 5.)}"
     # python monocular.py --method_name=ce --method_kwargs="{n_bins: 128, bounds: (-5., 5.)}"
     # python monocular.py --method_name=crpshist --method_kwargs="{n_bins: 128, bounds: (-5., 5.)}"
-    # python monocular.py --method_name=iqn
+
+    # python monocular.py --method_name=iqn (DOESN'T WORK YET)
