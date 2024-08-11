@@ -12,7 +12,7 @@ runs/
 # *.pdf
 *.gz
 cache*/
-*runs/
+*runs*/
 *data/
 
 monocular/
