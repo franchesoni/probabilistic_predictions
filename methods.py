@@ -77,8 +77,8 @@ class ProbabilisticMethod(ABC):
             dys.reshape(1, count).expand(pred_params.shape[0], count).to(batch_y.device)
         )
         Fy = self.get_F_at_y(dys, pred_params)  # (N, count)
-        heaviside = 1 * (batch_y <= dys)  # (N, count)
-        integrant = (Fy - heaviside) ** 2  # (N, count)
+        heavyside = 1 * (batch_y <= dys)  # (N, count)
+        integrant = (Fy - heavyside) ** 2  # (N, count)
         crps = (dys[0, 1] - dys[0, 0]) * (
             integrant[:, 0] / 2 + integrant[:, 1:].sum(dim=1) + integrant[:, -1] / 2
         )  # (N,)
