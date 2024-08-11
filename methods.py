@@ -328,7 +328,7 @@ class CRPSHist(CategoricalCrossEntropy):
         return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
 
 
-class CRPSQR(ProbabilisticMethod, nn.Module):
+class CRPSQR(PinballLoss):
     def loss(self, batch_y, pred_params):
         self.do_sort = False
         bin_borders = self.prepare_params(pred_params)["bin_borders"]
