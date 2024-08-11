@@ -667,7 +667,7 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     log_score = -(
         torch.log(bin_densities + 1e-45)
         * (y_bin == torch.arange(B, device=batch_y.device).reshape(1, B, 1))
-    ).mean(dim=1)
+    ).sum(dim=1)
     return log_score
 
 
