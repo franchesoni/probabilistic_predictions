@@ -1,17 +1,11 @@
 from pathlib import Path
-from itertools import product
 import itertools
-from functools import partial
-import pickle
-from contextlib import suppress
 from time import time
 from pathlib import Path
 
 import torch
 from numpy import nanmean as mean
 import tqdm
-import schedulefree
-from schedulefree import AdamWScheduleFree
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
@@ -40,7 +34,7 @@ def main(
     method_kwargs=dict(),
     max_seconds=60,
     batch_size=128,
-    num_workers=96,
+    num_workers=32,
     lr=1e-4,
     beta=0.9,
     warmup_steps=500,
@@ -64,13 +58,13 @@ def main(
     trainds = get_dataset(dataset_name, split="train", n_samples=100000)
     valds = get_dataset(dataset_name, split="val")
     testds = get_dataset(dataset_name, split="test")
-    traindl = torch.utils.data.DataLoader(trainds, batch_size=batch_size, shuffle=True)
+    traindl = torch.utils.data.DataLoader(trainds, batch_size=batch_size, num_workers=num_workers, shuffle=True)
     val_batch_size = batch_size
     while not (
         len(valds) % val_batch_size == 0
     ):  # reduce val batch size until it fits nicely
         val_batch_size -= 1
-    valdl = torch.utils.data.DataLoader(valds, batch_size=val_batch_size, shuffle=False)
+    valdl = torch.utils.data.DataLoader(valds, batch_size=val_batch_size, num_workers=num_workers, shuffle=False)
     test_batch_size = batch_size
     while not (len(testds) % test_batch_size == 0):
         test_batch_size -= 1
@@ -94,17 +88,17 @@ def main(
         [trainds.get_feature_dim(), *([hidden_dim] * hidden_layers)],
         **method_kwargs,
     ).to(device)
-    optimizer = schedulefree.AdamWScheduleFree(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
-        warmup_steps=int(warmup_steps),
         betas=(beta, 0.999),
+        weight_decay=weight_decay,
     )
 
     print("=" * 30)
     print(f"Training {method_name} on {dataset_name} for {max_seconds} seconds")
     model.train()
-    optimizer.train()
+    # optimizer.train()
 
     st = time()
     global_step = 0
@@ -251,16 +245,7 @@ def main(
 
 def validate(train_dl, val_dl, model, optim, device):
     print("validating...", end="/r")
-    # schedulefree setup
-    model.train()
-    optim.eval()
-    with torch.no_grad():
-        # for imgs, logdepths in itertools.islice(train_dl, 2):  # debug
-        for x, y in itertools.islice(train_dl, 50):
-            x = x.to(device).reshape(x.shape[0], -1).float()
-            embeddings = model(x)
     model.eval()
-    # validation
     with torch.no_grad():
         scores = {"logscore": [], "crps": [], "_alphas": []}
         print("validating...", end="\r")
@@ -302,9 +287,7 @@ def validate(train_dl, val_dl, model, optim, device):
             .numpy()
         )
     print("done validating.", end="/r")
-    # schedulefree setup
     model.train()
-    optim.train()
     return scores
 
 
