@@ -8,7 +8,10 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 
-from ucimlrepo import fetch_ucirepo
+try:
+    from ucimlrepo import fetch_ucirepo
+except:
+    print("Remember to `pip install ucimlrepo` to fetch UCI datasets")
 
 
 class AbstractDataset(ABC):
