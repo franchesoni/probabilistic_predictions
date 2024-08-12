@@ -10,6 +10,7 @@ log2pi = torch.log(torch.tensor(2 * torch.pi))
 
 class MLP(nn.Module):
     def __init__(self, layer_sizes: Sequence[int], activation_fn=nn.GELU, dropout_p=0.0):
+    # def __init__(self, layer_sizes: Sequence[int], activation_fn=nn.ReLU, dropout_p=0.0):
         super(MLP, self).__init__()
         self.dropout_p = dropout_p
         layers = []
@@ -22,6 +23,7 @@ class MLP(nn.Module):
                 layers.append(
                     nn.Dropout(p=self.dropout_p)
                 )
+        layers.append(nn.Sigmoid())
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -513,19 +515,25 @@ class MCD(CategoricalCrossEntropy):
 
     def predict_ensemble(self, x):
         preds = torch.stack([self.model(x) for _ in range(self.n_preds)], dim=1)
-        preds = preds.squeeze(2)
-        preds = nn.functional.softmax(preds, dim=1)
+        # preds is (BS, n_preds, 1)
+        # print(f"one prediction is {preds[0, :10]}")
+        preds = preds.squeeze(2)  # (BS, n_preds)
         # Calculate histogram
-        probs = torch.zeros((preds.shape[0], self.B))
+        probs = torch.zeros((preds.shape[0], self.B))  # (BS, num_bins)
         # breakpoint()
-        for n, batch in enumerate(preds):
-            hist = torch.histc(batch, bins=self.B, min=self.bounds[0], max=self.bounds[1])
+        for n in range(preds.shape[0]):
+            hist = torch.histc(preds[n], bins=self.B, min=self.bounds[0], max=self.bounds[1])
             probs[n] = hist / hist.sum()
         return probs
 
     def loss(self, batch_y, pred_params):
         # pred_params is (N, D))
         return self.mae_loss(batch_y, pred_params)
+
+    def turn_on_dropout(self):
+        for m in self.model.modules():
+            if m.__class__.__name__.startswith('Dropout'):
+                m.train()
 
 
 def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
@@ -535,15 +543,12 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     # bin_masses (N, B)
     # bin_borders (N, B+1)
     # breakpoint()
-    try:
-        assert not (
-            torch.isnan(batch_y).any()
-            or (torch.isnan(cdf_at_borders).any() if cdf_at_borders is not None else False)
-            or (torch.isnan(bin_masses).any() if bin_masses is not None else False)
-            or torch.isnan(bin_borders).any()
-        ), "NaN in input"
-    except:
-        breakpoint()
+    assert not (
+        torch.isnan(batch_y).any()
+        or (torch.isnan(cdf_at_borders).any() if cdf_at_borders is not None else False)
+        or (torch.isnan(bin_masses).any() if bin_masses is not None else False)
+        or torch.isnan(bin_borders).any()
+    ), "NaN in input"
     assert (bin_masses is None and cdf_at_borders is not None) or (
         bin_masses is not None and cdf_at_borders is None
     )

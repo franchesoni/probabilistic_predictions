@@ -101,7 +101,7 @@ def main(
     # optimizer.train()
 
     st = time()
-    global_step = 0
+    global_step = 1
     while True:
         for x, y in traindl:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
@@ -151,7 +151,7 @@ def main(
     print(
         "\n"+
         f"Final results:\n"
-        +f"Logscore: {final_scores['logscore']}, CRPS: {final_scores['crps']}, ECE: {final_scores['ece']}"
+        +f"Logscore: {final_scores['logscore']:.5f}, CRPS: {final_scores['crps']:.5f}, ECE: {final_scores['ece']:.5f}"
     )
 
     # figures and log
@@ -165,7 +165,7 @@ def main(
     plt.xlabel(r"$\alpha$")
     plt.ylabel("Frequency")
     plt.savefig(dstdir / "PIT_hist.png")
-    print("Time to plot PIT hist:", time() - st)
+    print(f"Time to plot PIT hist: {(time() - st):.4f}")
     st = time()
 
     plt.figure()
@@ -178,7 +178,7 @@ def main(
     plt.xlabel(r"$\alpha$")
     plt.ylabel(r"$\alpha_{(i)}/N$")
     plt.savefig(dstdir / "reliability.png")
-    print("Time to plot reliability:", time() - st)
+    print(f"Time to plot reliability: {(time() - st):.4f}")
     st = time()
 
     if dataset_name == "bishop_toy":
@@ -189,28 +189,11 @@ def main(
         x_vis = torch.linspace(-0.1, 1.1, 1000).reshape(-1, 1).to(device)
 
         # Calculate the PDF values for the grid
+        model.eval()
         with torch.no_grad():
             if isinstance(model, MCD):
+                model.turn_on_dropout()
                 params = model.predict_ensemble(x_vis)
-                # params = model(x_vis)
-                # plt.figure()
-                # plt.scatter(
-                #     testds.X.cpu().numpy(),
-                #     testds.Y.cpu().numpy(),
-                #     s=1,
-                #     label="Data",
-                #     color="black",
-                # )
-                # for i in range(params.shape[1]):
-                #     plt.plot(
-                #         x_vis.cpu().numpy().reshape(-1),
-                #         params[:, i].cpu().numpy(),
-                #         label=f"Param {i}",
-                #     )
-                # plt.legend()
-                # plt.xlabel("X")
-                # plt.ylabel("Params")
-                # plt.savefig(dstdir / "Parameters_median.png")
             else:
                 params = model(x_vis)
             energy = model.get_logscore_at_y(
@@ -266,8 +249,9 @@ def main(
 
 
 def validate(train_dl, val_dl, model, optim, device):
-    print("validating...", end="/r")
     model.eval()
+    if isinstance(model, MCD):
+        model.turn_on_dropout()
     with torch.no_grad():
         scores = {"logscore": [], "crps": [], "_alphas": []}
         print("validating...", end="\r")
@@ -277,8 +261,14 @@ def validate(train_dl, val_dl, model, optim, device):
             x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
             if isinstance(model, MCD):
                 pred = model.predict_ensemble(x)
+                # print(f"pred shape: {pred.shape}")
+                # print(f"pred: {pred[0]}")
+                # print(f"pred min-max: {pred.min()}, {pred.max()}")
             else:
                 pred = model(x)
+                # print(f"pred shape: {pred.shape}")
+                # print(f"pred: {pred[0]}")
+                # print(f"pred min-max: {pred.min()}, {pred.max()}")
             scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
             target_range = y.max() - y.min()
             scores["crps"].append(
@@ -311,7 +301,7 @@ def validate(train_dl, val_dl, model, optim, device):
             .cpu()
             .numpy()
         )
-    print("done validating.", end="/r")
+    print("done validating.", end="\r")
     model.train()
     return scores
 
