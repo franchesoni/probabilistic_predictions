@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets import get_dataset
-from methods import get_method
+from methods import get_method, MCD
 
 
 # debug util
@@ -190,7 +190,29 @@ def main(
 
         # Calculate the PDF values for the grid
         with torch.no_grad():
-            params = model(x_vis)
+            if isinstance(model, MCD):
+                params = model.predict_ensemble(x_vis)
+                # params = model(x_vis)
+                # plt.figure()
+                # plt.scatter(
+                #     testds.X.cpu().numpy(),
+                #     testds.Y.cpu().numpy(),
+                #     s=1,
+                #     label="Data",
+                #     color="black",
+                # )
+                # for i in range(params.shape[1]):
+                #     plt.plot(
+                #         x_vis.cpu().numpy().reshape(-1),
+                #         params[:, i].cpu().numpy(),
+                #         label=f"Param {i}",
+                #     )
+                # plt.legend()
+                # plt.xlabel("X")
+                # plt.ylabel("Params")
+                # plt.savefig(dstdir / "Parameters_median.png")
+            else:
+                params = model(x_vis)
             energy = model.get_logscore_at_y(
                 y_grid.expand(x_vis.shape[0], -1).contiguous(), params
             )
@@ -253,7 +275,10 @@ def validate(train_dl, val_dl, model, optim, device):
         for x, y in tqdm.tqdm(val_dl):
             x, y = x.to(device), y.to(device)
             x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
-            pred = model(x)
+            if isinstance(model, MCD):
+                pred = model.predict_ensemble(x)
+            else:
+                pred = model(x)
             scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
             target_range = y.max() - y.min()
             scores["crps"].append(
