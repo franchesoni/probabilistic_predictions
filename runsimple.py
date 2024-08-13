@@ -116,7 +116,7 @@ def main(
             optimizer.step()
             loss_value = loss.item()
 
-            if global_step % val_every == 0:
+            if val_every is not None and global_step % val_every == 0:
                 val_scores = validate(traindl, valdl, model, optimizer, device)
                 for score_name, score_value in val_scores.items():
                     if score_name.startswith("_alphas"):
@@ -140,6 +140,15 @@ def main(
                 break
         if end_training:
             break
+
+    if isinstance(model, MCD):
+        std_grid_search(
+            std_bounds=[0.1, 0.3],
+            num_samples=10,
+            val_dl=valdl,
+            model=model,
+            device=device
+        )
 
     # evaluate on test
     final_scores = validate(traindl, testdl, model, optimizer, device)
@@ -246,6 +255,52 @@ def main(
             plt.ylabel("Y")
             plt.colorbar(label=cbar_name)
             plt.savefig(dstdir / f"{cbar_name}.png")
+
+
+def std_grid_search(std_bounds, num_samples, val_dl, model, device):
+    model.eval()
+    model.turn_on_dropout()
+    with torch.no_grad():
+        print("grid searching std...", end="\r")
+        seed_everything(0)
+        min_logscore = float("inf")
+        min_crps = float("inf")
+        for std in torch.linspace(*std_bounds, num_samples):
+            scores = {"logscore": [], "crps": [], "_alphas": []}
+            for x, y in tqdm.tqdm(val_dl):
+                x, y = x.to(device), y.to(device)
+                x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
+                pred = model.predict_ensemble(x, std=std)
+                scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
+                target_range = y.max() - y.min()
+                scores["crps"].append(
+                    mean(
+                        model.get_numerical_CRPS(
+                            y,
+                            pred,
+                            lower=y.min() - target_range * 0.05,
+                            upper=y.max() + target_range * 0.05,
+                            count=100,
+                            divide=False,
+                        ).cpu()
+                    )
+                )
+                scores["_alphas"].append(model.get_F_at_y(y, pred).cpu())  # collect alphas
+            scores["logscore"] = mean(scores["logscore"])
+            scores["crps"] = mean(scores["crps"])
+
+            if scores["logscore"] < min_logscore:
+                min_logscore = scores["logscore"]
+                best_logscore_std = std
+
+            if scores["crps"] < min_crps:
+                min_crps = scores["crps"]
+                best_crps_std = std
+
+    print(f"Logscore: {min_logscore:.5f} at std: {best_logscore_std:.5f}")
+    model.best_std = best_logscore_std
+    print(f"CRPS: {min_crps:.5f} at std: {best_crps_std:.5f}")
+    print("grid search end.", end="\r")
 
 
 def validate(train_dl, val_dl, model, optim, device):

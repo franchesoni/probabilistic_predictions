@@ -504,17 +504,25 @@ class MCD(CategoricalCrossEntropy):
         """
         super(MCD, self).__init__(layer_sizes, n_bins, bounds)
         self.model = MLP(layer_sizes + [1], dropout_p=dropout_p, **kwargs)
-        self.mae_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
         self.bounds = bounds
         self.dropout_p = dropout_p
         self.n_preds = n_preds
+        self.best_std = None
 
     def forward(self, batch_x):
         preds = self.model(batch_x)  # logits
         return preds
 
-    def predict_ensemble(self, x):
-        preds = torch.stack([self.model(x) for _ in range(self.n_preds)], dim=1)
+    def predict_ensemble(self, x, std=torch.tensor(0.05)):
+        if self.best_std is not None:
+            std_ = self.best_std
+        else:
+            std_ = std
+        preds = torch.stack(
+            [self.model(x) + torch.normal(0, std_) for _ in range(self.n_preds)],
+            dim=1
+        )
         # preds is (BS, n_preds, 1)
         # print(f"one prediction is {preds[0, :10]}")
         preds = preds.squeeze(2)  # (BS, n_preds)
@@ -528,7 +536,7 @@ class MCD(CategoricalCrossEntropy):
 
     def loss(self, batch_y, pred_params):
         # pred_params is (N, D))
-        return self.mae_loss(batch_y, pred_params)
+        return self.mse_loss(batch_y, pred_params)
 
     def turn_on_dropout(self):
         for m in self.model.modules():
