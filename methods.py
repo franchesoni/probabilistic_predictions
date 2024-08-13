@@ -69,7 +69,7 @@ class ProbabilisticMethod(ABC):
             dys.reshape(1, count).expand(pred_params.shape[0], count).to(batch_y.device)
         )
         Fy = self.get_F_at_y(dys, pred_params)  # (N, count)
-        heavyside = 1 * (batch_y <= dys)  # (N, count)
+        heavyside = 1 * (batch_y.expand(-1, dys.shape[1]) <= dys)  # (N, count)
         integrant = (Fy - heavyside) ** 2  # (N, count)
         crps = (dys[0, 1] - dys[0, 0]) * (
             integrant[:, 0] / 2 + integrant[:, 1:].sum(dim=1) + integrant[:, -1] / 2
@@ -341,7 +341,7 @@ class CRPSQR(PinballLoss):
 
 
 class IQN(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, n_layers_h=3, cos_n=64, **kwargs):
+    def __init__(self, layer_sizes, n_quantile_levels, bounds, n_layers_h=3, cos_n=64, **kwargs):
         # here we init the iqn, which is composed by h and phi. These are separate networks.
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
@@ -359,6 +359,18 @@ class IQN(ProbabilisticMethod, nn.Module):
         )
         self.register_buffer("pis", pis)
         self.cos_embed = nn.Linear(self.cos_n, self.embedding_dim)
+        self.n_quantile_levels = n_quantile_levels
+        quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1]
+        self.quantile_levels = torch.sort(quantile_levels)[0]
+        assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
+        assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
+        self.lower, self.upper = bounds
+        self.lower, self.upper = torch.tensor(self.lower), torch.tensor(self.upper)
+        self.quantile_levels = torch.concatenate(
+            (torch.tensor([0]), self.quantile_levels, torch.tensor([1]))
+        )
+        self.B = len(self.quantile_levels) - 1
+        self.do_sort = True  # because we don't care about the gradient
 
     def sample_taus(self, batch_size, n_taus=8):
         taus = torch.rand(batch_size, n_taus).unsqueeze(2)  # (N, n_taus, 1)
@@ -372,28 +384,47 @@ class IQN(ProbabilisticMethod, nn.Module):
             self.cos_embed(torch.cos(taus * self.pis).view(-1, self.cos_n))
         ).view(*taus_shape, self.embedding_dim)
 
-    def forward(self, batch_x):
-        return self.g(batch_x)  # (N, embedding_dim)
-
-    def loss(self, batch_y, pred_params):
-        # pred_params is (N, D)
-        N, Y = batch_y.shape
-        taus = self.sample_taus(batch_y.shape[0]).to(batch_y.device)  # (N, n_taus, 1)
+    def forward(self, batch_x, taus=None):
+        if taus is None:
+            taus = self.quantile_levels[1:-1].unsqueeze(0).expand(batch_x.shape[0], -1).unsqueeze(2)
+        input_embedding = self.g(batch_x)  # (N, embedding_dim)
         tau_embedding = self.get_tau_embedding(taus)  # (N, n_taus, 1, embedding_dim)
         assert tau_embedding.shape[2] == 1
         tau_embedding = tau_embedding.squeeze(2)  # (N, n_taus, embedding_dim)
-        quantiles = self.h(tau_embedding * pred_params.unsqueeze(1))  # (N, n_taus, 1)
-        pinball = (taus - 1 * (batch_y.unsqueeze(1) < quantiles)) * (
-            batch_y.unsqueeze(1) - quantiles
-        )  # (N, n_taus, Y)
+        quantiles = self.h(tau_embedding * input_embedding.unsqueeze(1))  # (N, n_taus, 1)
+        return quantiles.squeeze(2)  # (N, n_taus, 1)
+
+    def loss(self, batch_y, pred_params, taus=None):
+        pinball = (taus.squeeze(2) - 1 * (batch_y < pred_params)) * (
+            batch_y - pred_params
+        )  # (N, n_taus)
         return pinball.sum(dim=1).mean()
 
-    def prepare_params(self, batch_y, pred_params):
-        batch_y = batch_y.contiguous()
-        N, Y = batch_y.shape
-        D = pred_params.shape[1]
-        pred_params = pred_params.expand(N, D)  # (N, D)
-        return N, Y, D, batch_y, pred_params
+    def prepare_params(self, pred_params):
+        self.lower, self.upper = self.lower.to(pred_params.device), self.upper.to(
+            pred_params.device
+        )
+        self.quantile_levels = self.quantile_levels.to(pred_params.device)
+        cdf_at_borders = self.quantile_levels.reshape(1, -1)
+        bin_masses = None
+        N, Q = pred_params.shape  # Q = number of quantiles
+        bin_borders = torch.concatenate(
+            (
+                self.lower.reshape(1, 1).expand(N, 1),
+                pred_params,
+                self.upper.reshape(1, 1).expand(N, 1),
+            ),
+            dim=1,
+        )
+        if self.do_sort:
+            bin_borders = torch.sort(bin_borders, dim=1)[
+                0
+            ]  # we can do this in pinball as we don't care about this gradient
+        return dict(
+            cdf_at_borders=cdf_at_borders,
+            bin_masses=bin_masses,
+            bin_borders=bin_borders,
+        )
 
     def get_dist(self, batch_y, pred_params, samples_per_step=8, num_steps=4):
         N, Y, D, batch_y, pred_params = self.prepare_params(batch_y, pred_params)
@@ -479,10 +510,11 @@ class IQN(ProbabilisticMethod, nn.Module):
         return F_at_y, f_at_y
 
     def get_F_at_y(self, batch_y, pred_params):
-        return self.get_dist(batch_y, pred_params)[0]
+        return get_F_at_y_PL(batch_y, **self.prepare_params(pred_params))
 
     def get_logscore_at_y(self, batch_y, pred_params):
-        return -torch.log(self.get_dist(batch_y, pred_params)[1])
+        logscore = get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params))
+        return logscore
 
 
 def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):

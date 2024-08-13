@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets import get_dataset
-from methods import get_method
+from methods import get_method, IQN
 
 
 # debug util
@@ -107,16 +107,26 @@ def main(
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
             optimizer.zero_grad()
-            pred = model(x)
+            if isinstance(model, IQN):
+                taus = model.sample_taus(
+                    x.shape[0],
+                    n_taus=model.n_quantile_levels
+                ).to(x.device)  # (N, n_taus, 1)
+                pred = model(x, taus)
+            else:
+                pred = model(x)
             pred.retain_grad()  # debug
-            loss = model.loss(y, pred)
+            if isinstance(model, IQN):
+                loss = model.loss(y, pred, taus)
+            else:
+                loss = model.loss(y, pred)
             loss.backward()
             writer.add_scalar("loop/pred_grad_norm", torch.norm(pred.grad).item(), global_step)
 
             optimizer.step()
             loss_value = loss.item()
 
-            if global_step % val_every == 0:
+            if global_step + 1 % val_every == 0:
                 val_scores = validate(traindl, valdl, model, optimizer, device)
                 for score_name, score_value in val_scores.items():
                     if score_name.startswith("_alphas"):
