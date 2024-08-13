@@ -116,7 +116,7 @@ def main(
             optimizer.step()
             loss_value = loss.item()
 
-            if global_step % val_every == 0:
+            if global_step + 1 % val_every == 0:
                 val_scores = validate(traindl, valdl, model, optimizer, device)
                 for score_name, score_value in val_scores.items():
                     if score_name.startswith("_alphas"):

@@ -108,6 +108,26 @@ class LaplaceLogScore(ProbabilisticMethod, nn.Module):
         return torch.stack([mu, blogits], dim=1)
 
 
+class LaplaceCRPS(LaplaceLogScore):
+    def __init__(self, layer_sizes, **kwargs):
+        """
+        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
+        It does not include the last layer.
+        """
+        super(LaplaceCRPS, self).__init__(layer_sizes)
+        self.model = MLP(layer_sizes + [2], **kwargs)
+
+    def get_crps_at_y(self, batch_y, pred_params):
+        mus, bs = pred_params[:, 0:1], pred_params[:, 1:]
+        crps = bs * (torch.abs(batch_y - mus)/bs + torch.exp(-torch.abs(batch_y - mus)/bs) - 3/4)
+        return crps
+
+    def loss(self, batch_y, pred_params):
+        return self.get_crps_at_y(
+            batch_y, pred_params
+        ).mean()  # we should use sum but the mean has more deceent magnitude
+
+
 class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
     def __init__(self, layer_sizes, train_width=True, **kwargs):
         """
@@ -917,6 +937,7 @@ if __name__ == "__main__":
 
 method_names = [
     "laplacescore",
+    "laplacecrps",
     "laplacewb",
     "mdn",
     "ce",
@@ -930,6 +951,8 @@ method_names = [
 def get_method(method_name):
     if method_name == "laplacescore":
         return LaplaceLogScore
+    elif method_name == "laplacecrps":
+        return LaplaceCRPS
     elif method_name == "laplacewb":
         return LaplaceGlobalWidth
     elif method_name == "mdn":
