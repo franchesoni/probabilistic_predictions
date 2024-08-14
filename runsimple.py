@@ -51,7 +51,7 @@ def main(
     torch.autograd.set_detect_anomaly(True)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     tag = "_" + tag if tag else ""
-    writer = SummaryWriter(comment=f"_{method_name}_{dataset_name.replace(' ', '_')}_{tag}")
+    writer = SummaryWriter(comment=f"_{method_name}_{dataset_name}_{tag}")
     dstdir = Path(writer.get_logdir())
     # data
     trainds = get_dataset(dataset_name, split="train", n_samples=100000)
@@ -295,14 +295,8 @@ def validate(train_dl, val_dl, model, optim, device):
             x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
             if isinstance(model, MCD):
                 pred = model.predict_ensemble(x)
-                # print(f"pred shape: {pred.shape}")
-                # print(f"pred: {pred[0]}")
-                # print(f"pred min-max: {pred.min()}, {pred.max()}")
             else:
                 pred = model(x)
-                # print(f"pred shape: {pred.shape}")
-                # print(f"pred: {pred[0]}")
-                # print(f"pred min-max: {pred.min()}, {pred.max()}")
             scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
             target_range = y.max() - y.min()
             scores["crps"].append(
@@ -317,7 +311,7 @@ def validate(train_dl, val_dl, model, optim, device):
                     ).cpu()
                 )
             )
-            scores["_alphas"].append(model.get_F_at_y(y, pred).cpu())  # collect alphas
+            scores["_alphas"].append(model.get_F_at_y(y, pred).cpu().float())  # collect alphas
         scores["logscore"] = mean(scores["logscore"])
         scores["crps"] = mean(scores["crps"])
         scores["_alphas"] = torch.cat(scores["_alphas"], dim=0).flatten() # (N, 1)

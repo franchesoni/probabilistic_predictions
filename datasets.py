@@ -113,8 +113,9 @@ def cached_fetch_ucirepo(name):
 
 
 class UCIRepoDataset(AbstractDataset, torch.utils.data.Dataset):
-    def __init__(self, name, split="train", seed=0):
+    def __init__(self, name, split="train", n_samples=1000, seed=0):
         dataset = cached_fetch_ucirepo(name=name)
+        self.n_samples = n_samples
         self.X = dataset["data"]["features"]
         if (dataset["variables"]["type"] == "Categorical").any():
             categorical_feature_names = dataset["variables"][
@@ -146,10 +147,10 @@ class UCIRepoDataset(AbstractDataset, torch.utils.data.Dataset):
         if split == "train":
             self.X = X_train
             self.y = y_train
-        elif split == "val":    
+        elif split == "val":
             self.X = X_val
             self.y = y_val
-        elif split == "test":   
+        elif split == "test":
             self.X = X_test
             self.y = y_test
 
@@ -185,7 +186,7 @@ ucireponames = dict(
 def get_dataset(dataset_name, **kwargs):
     if dataset_name == "bishop_toy":
         return BishopToy(**kwargs)
-    elif dataset_name in ucireponames.values():
+    elif dataset_name.replace("_", " ") in ucireponames.values():
         return UCIRepoDataset(dataset_name, **kwargs)
     else:
         raise ValueError(f"Unknown dataset {dataset_name}")
