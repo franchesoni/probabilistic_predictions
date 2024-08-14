@@ -10,7 +10,7 @@ import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import cv2
 from numpy import nanmean as mean
-from schedulefree import AdamWScheduleFree
+from torch.optim import AdamW
 
 from methods import get_method
 
@@ -206,17 +206,15 @@ def train(
         device=device,
     )
     # optim
-    optim = AdamWScheduleFree(
+    optim = AdamW(
         list(model.parameters()) + list(method.parameters()),
         lr=lr,
         betas=(beta, 0.999),
         weight_decay=weight_decay,
-        warmup_steps=warmup_steps,
     )
 
     model.train()
     method.train()
-    optim.train()
 
     st = time.time()
     global_step = 0
@@ -284,16 +282,7 @@ def reshape_downsample(embeddings, logdepths, dsfactor):
 
 def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
     print("validating...", end="/r")
-    # schedulefree setup
-    model.train()
-    method.train()
-    optim.eval()
-    with torch.no_grad():
-        # for imgs, logdepths in itertools.islice(train_dl, 2):  # debug
-        for imgs, logdepths in itertools.islice(train_dl, 50):
-            embeddings = model(imgs)  # (B, E, H, W)
-            embeddings, logdepths = reshape_downsample(embeddings, logdepths, dsfactor=val_dsfactor)
-            params = method(embeddings)  # (BHdsWds, P)
+
     model.eval()
     method.eval()
 
@@ -354,7 +343,6 @@ def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
     # schedulefree setup
     model.train()
     method.train()
-    optim.train()
     return scores, vis_imgs, vis_target
 
 
