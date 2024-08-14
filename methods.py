@@ -373,6 +373,7 @@ class LogScoreQR(PinballLoss):
 
 
 class LogScoreQR2(PinballLoss):
+    """This loss doesn't default to pinball when the ordering of the predicted bins isn't right. Instead, it penalizes disorder and monotonizes the borders to compute the logscore. Extremes aren't handled nicely, needs improvement."""
     def loss(self, batch_y, pred_params):
         self.do_sort = False
         bin_borders = self.prepare_params(pred_params)["bin_borders"]
