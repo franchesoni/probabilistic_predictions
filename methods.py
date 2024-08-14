@@ -372,6 +372,19 @@ class LogScoreQR(PinballLoss):
             return get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
 
 
+class LogScoreQR2(PinballLoss):
+    def loss(self, batch_y, pred_params):
+        self.do_sort = False
+        bin_borders = self.prepare_params(pred_params)["bin_borders"]
+        self.do_sort = True
+        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+        ordering_penalty = torch.nn.functional.relu(-bin_widths).sum()  # those that are negative
+        bin_borders = torch.concatenate((bin_borders[:,0:1], bin_borders[:, :-1]+torch.nn.functional.relu(bin_widths)), dim=1)
+        return ordering_penalty + get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
+
+
+
+
 class IQN(ProbabilisticMethod, nn.Module):
     def __init__(self, layer_sizes, n_layers_h=3, cos_n=64, **kwargs):
         # here we init the iqn, which is composed by h and phi. These are separate networks.
