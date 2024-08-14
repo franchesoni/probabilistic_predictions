@@ -8,7 +8,10 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 
-from ucimlrepo import fetch_ucirepo
+try:
+    from ucimlrepo import fetch_ucirepo
+except:
+    print("Remember to `pip install ucimlrepo` to fetch UCI datasets")
 
 
 class AbstractDataset(ABC):
@@ -183,7 +186,7 @@ def get_dataset(dataset_name, **kwargs):
     if dataset_name == "bishop_toy":
         return BishopToy(**kwargs)
     elif dataset_name in ucireponames:
-        return UCIRepoDataset(ucireponames[dataset_name])
+        return UCIRepoDataset(ucireponames[dataset_name], **kwargs)
 
 
 # # load once

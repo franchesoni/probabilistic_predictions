@@ -16,14 +16,6 @@ class MLP(nn.Module):
             if i < len(layer_sizes) - 2:
                 layers.append(activation_fn())
         self.network = nn.Sequential(*layers)
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for module in self.network:
-            if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, mean=0.0, std=1e-5)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
 
     def forward(self, x):
         return self.network(x)
@@ -243,7 +235,6 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
         )
 
     def get_F_at_y(self, batch_y, pred_params):
-        bin_masses = pred_params
         return get_F_at_y_PL(batch_y, **self.prepare_params(pred_params))
 
     def get_logscore_at_y(self, batch_y, pred_params):
@@ -259,7 +250,9 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
 
 
 class PinballLoss(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, n_quantile_levels, bounds, **kwargs):
+    def __init__(
+        self, layer_sizes, n_quantile_levels, bounds, predict_residuals=False, **kwargs
+    ):
         """
         `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
         It does not include the last layer.
@@ -276,6 +269,8 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         )
         self.B = len(self.quantile_levels) - 1
         self.model = MLP(layer_sizes + [len(quantile_levels)], **kwargs)
+        self.predict_residuals = predict_residuals
+        self.do_sort = True  # because we don't care about the gradient
 
     def prepare_params(self, pred_params):
         self.lower, self.upper = self.lower.to(pred_params.device), self.upper.to(
@@ -293,9 +288,10 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
             ),
             dim=1,
         )
-        bin_borders = torch.sort(bin_borders, dim=1)[
-            0
-        ]  # we can do this as we don't care about this gradient
+        if self.do_sort:
+            bin_borders = torch.sort(bin_borders, dim=1)[
+                0
+            ]  # we can do this in pinball as we don't care about this gradient
         return dict(
             cdf_at_borders=cdf_at_borders,
             bin_masses=bin_masses,
@@ -307,8 +303,6 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
 
     def get_logscore_at_y(self, batch_y, pred_params):
         logscore = get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params))
-        if torch.isnan(logscore).any():
-            raise ValueError("NaN in logscore")
         return logscore
 
     def loss(self, batch_y, pred_params):
@@ -320,108 +314,6 @@ class PinballLoss(ProbabilisticMethod, nn.Module):
         return pinball.sum(dim=1).mean()
 
     def forward(self, batch_x):
-        return self.model(batch_x)
-
-
-class CRPSHist(ProbabilisticMethod, nn.Module):
-    def __init__(self, layer_sizes, n_bins, bounds, **kwargs):
-        """
-        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
-        It does not include the last layer.
-        """
-        super(CRPSHist, self).__init__()
-        bin_borders = torch.linspace(bounds[0], bounds[1], n_bins + 1)
-        self.B = len(bin_borders) - 1
-        self.bin_borders = bin_borders
-        self.bin_widths = self.bin_borders[1:] - self.bin_borders[:-1]
-        assert self.bin_widths.min() > 0, "Bin borders must be strictly increasing"
-        self.model = MLP(layer_sizes + [self.B], **kwargs)
-
-    def prepare_params(self, pred_params):
-        return dict(
-            cdf_at_borders=None,
-            bin_masses=pred_params,
-            bin_borders=self.bin_borders.reshape(1, self.B + 1),
-        )
-
-    def get_F_at_y(self, batch_y, pred_params):
-        bin_masses = pred_params
-        return get_F_at_y_PL(batch_y, **self.prepare_params(pred_params))
-
-    def get_logscore_at_y(self, batch_y, pred_params):
-        return get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params))
-
-    def loss(self, batch_y, pred_params):
-        return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
-
-    def forward(self, batch_x):
-        logits = self.model(batch_x)
-        masses = nn.functional.softmax(logits, dim=1)
-        return masses
-
-
-class CRPSQR(ProbabilisticMethod, nn.Module):
-    def __init__(
-        self, layer_sizes, n_quantile_levels, bounds, predict_residuals=False, **kwargs
-    ):
-        """
-        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
-        It does not include the last layer.
-        """
-        super(CRPSQR, self).__init__()
-        quantile_levels = torch.linspace(0, 1, n_quantile_levels + 2)[1:-1]
-        self.quantile_levels = torch.sort(quantile_levels)[0]
-        assert self.quantile_levels.min() > 0, "Quantiles must be in [0, 1]"
-        assert self.quantile_levels.max() < 1, "Quantiles must be in [0, 1]"
-        self.lower, self.upper = bounds
-        self.lower, self.upper = torch.tensor(self.lower), torch.tensor(self.upper)
-        self.quantile_levels = torch.concatenate(
-            (torch.tensor([0]), self.quantile_levels, torch.tensor([1]))
-        )
-        self.B = len(self.quantile_levels) - 1
-        self.model = MLP(layer_sizes + [len(quantile_levels)], **kwargs)
-        self.predict_residuals = predict_residuals
-
-    def prepare_params(self, pred_params):
-        self.lower, self.upper = self.lower.to(pred_params.device), self.upper.to(
-            pred_params.device
-        )
-        cdf_at_borders = self.quantile_levels.reshape(1, -1)
-        bin_masses = None
-        N, Q = pred_params.shape  # Q = number of quantiles
-        bin_borders = torch.concatenate(
-            (
-                self.lower.reshape(1, 1).expand(N, 1),
-                pred_params,
-                self.upper.reshape(1, 1).expand(N, 1),
-            ),
-            dim=1,
-        )  # (N, B+1)
-        return dict(
-            cdf_at_borders=cdf_at_borders,
-            bin_masses=bin_masses,
-            bin_borders=bin_borders,
-        )
-
-    def get_F_at_y(self, batch_y, pred_params):
-        kwparams = self.prepare_params(pred_params)
-        kwparams["bin_borders"] = torch.sort(kwparams["bin_borders"], dim=1)[0]
-        return get_F_at_y_PL(batch_y, **kwparams)
-
-    def get_logscore_at_y(self, batch_y, pred_params):
-        kwparams = self.prepare_params(pred_params)
-        kwparams["bin_borders"] = torch.sort(kwparams["bin_borders"], dim=1)[0]
-        return get_logscore_at_y_PL(batch_y, **kwparams)
-
-    def loss(self, batch_y, pred_params):
-        bin_borders = self.prepare_params(pred_params)["bin_borders"]
-        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
-        if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
-            return (-bin_widths * (bin_widths < 0)).sum()
-        else:
-            return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
-
-    def forward(self, batch_x):
         out = self.model(batch_x)
         if self.predict_residuals:
             residuals = torch.concatenate(
@@ -429,6 +321,23 @@ class CRPSQR(ProbabilisticMethod, nn.Module):
             )
             out = torch.cumsum(residuals, dim=1)
         return out
+
+
+class CRPSHist(CategoricalCrossEntropy):
+    def loss(self, batch_y, pred_params):
+        return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
+
+
+class CRPSQR(PinballLoss):
+    def loss(self, batch_y, pred_params):
+        self.do_sort = False
+        bin_borders = self.prepare_params(pred_params)["bin_borders"]
+        self.do_sort = True
+        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+        if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
+            return super().loss(batch_y, pred_params)
+        else:
+            return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
 
 
 class IQN(ProbabilisticMethod, nn.Module):
@@ -667,7 +576,7 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     log_score = -(
         torch.log(bin_densities + 1e-45)
         * (y_bin == torch.arange(B, device=batch_y.device).reshape(1, B, 1))
-    ).mean(dim=1)
+    ).sum(dim=1)
     return log_score
 
 
