@@ -10,7 +10,6 @@ log2pi = torch.log(torch.tensor(2 * torch.pi))
 
 class MLP(nn.Module):
     def __init__(self, layer_sizes: Sequence[int], activation_fn=nn.GELU, dropout_p=0.0):
-    # def __init__(self, layer_sizes: Sequence[int], activation_fn=nn.ReLU, dropout_p=0.0):
         super(MLP, self).__init__()
         self.dropout_p = dropout_p
         layers = []
@@ -23,7 +22,7 @@ class MLP(nn.Module):
                 layers.append(
                     nn.Dropout(p=self.dropout_p)
                 )
-        layers.append(nn.Sigmoid())
+        # layers.append(nn.Sigmoid())
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -257,7 +256,6 @@ class CategoricalCrossEntropy(ProbabilisticMethod, nn.Module):
         self.model = MLP(layer_sizes + [self.B], **kwargs)
 
     def prepare_params(self, pred_params):
-        # breakpoint()
         return dict(
             cdf_at_borders=None,
             bin_masses=pred_params,
@@ -574,7 +572,6 @@ class MCD(CategoricalCrossEntropy):
         preds = preds.squeeze(2)  # (BS, n_preds)
         # Calculate histogram
         probs = torch.zeros((preds.shape[0], self.B))  # (BS, num_bins)
-        # breakpoint()
         for n in range(preds.shape[0]):
             hist = torch.histc(preds[n], bins=self.B, min=self.bounds[0], max=self.bounds[1])
             probs[n] = hist / hist.sum()
@@ -596,7 +593,6 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     # cdf_at_borders (N, B+1)
     # bin_masses (N, B)
     # bin_borders (N, B+1)
-    # breakpoint()
     assert not (
         torch.isnan(batch_y).any()
         or (torch.isnan(cdf_at_borders).any() if cdf_at_borders is not None else False)

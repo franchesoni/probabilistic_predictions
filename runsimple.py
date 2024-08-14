@@ -51,7 +51,7 @@ def main(
     torch.autograd.set_detect_anomaly(True)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     tag = "_" + tag if tag else ""
-    writer = SummaryWriter(comment=f"_{method_name}_{dataset_name.replace(' ', '_')}_{tag}")
+    writer = SummaryWriter(comment=f"_{method_name}_{dataset_name}_{tag}")
     dstdir = Path(writer.get_logdir())
     # data
     trainds = get_dataset(dataset_name, split="train", n_samples=100000)
