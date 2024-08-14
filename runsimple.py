@@ -46,13 +46,12 @@ def main(
     tag="",
     device="cuda:0",
 ):
-    assert dataset_name == "bishop_toy", "Only bishop_toy is supported for now"
     # utils
     seed_everything(seed)
     torch.autograd.set_detect_anomaly(True)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     tag = "_" + tag if tag else ""
-    writer = SummaryWriter(comment=f"_{method_name}{tag}")
+    writer = SummaryWriter(comment=f"_{method_name}_{dataset_name.replace(' ', '_')}_{tag}")
     dstdir = Path(writer.get_logdir())
     # data
     trainds = get_dataset(dataset_name, split="train", n_samples=100000)
@@ -101,11 +100,11 @@ def main(
     # optimizer.train()
 
     st = time()
-    global_step = 1
+    global_step = 0
     while True:
         for x, y in traindl:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-            x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
+            x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1).float()
             optimizer.zero_grad()
             pred = model(x)
             pred.retain_grad()  # debug
@@ -116,7 +115,7 @@ def main(
             optimizer.step()
             loss_value = loss.item()
 
-            if val_every is not None and global_step % val_every == 0:
+            if val_every is not None and (global_step + 1) % val_every == 0:
                 val_scores = validate(traindl, valdl, model, optimizer, device)
                 for score_name, score_value in val_scores.items():
                     if score_name.startswith("_alphas"):
@@ -143,7 +142,7 @@ def main(
 
     if isinstance(model, MCD):
         std_grid_search(
-            std_bounds=[0.1, 0.3],
+            std_bounds=[0.01, 0.2],
             num_samples=10,
             val_dl=valdl,
             model=model,
@@ -160,7 +159,7 @@ def main(
     print(
         "\n"+
         f"Final results:\n"
-        +f"Logscore: {final_scores['logscore']:.5f}, CRPS: {final_scores['crps']:.5f}, ECE: {final_scores['ece']:.5f}"
+        +f"Logscore: {final_scores['logscore']}, CRPS: {final_scores['crps']}, ECE: {final_scores['ece']}"
     )
 
     # figures and log
@@ -264,42 +263,22 @@ def std_grid_search(std_bounds, num_samples, val_dl, model, device):
         print("grid searching std...", end="\r")
         seed_everything(0)
         min_logscore = float("inf")
-        min_crps = float("inf")
         for std in torch.linspace(*std_bounds, num_samples):
-            scores = {"logscore": [], "crps": [], "_alphas": []}
+            scores = {"logscore": []}
             for x, y in tqdm.tqdm(val_dl):
                 x, y = x.to(device), y.to(device)
                 x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
                 pred = model.predict_ensemble(x, std=std)
                 scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
-                target_range = y.max() - y.min()
-                scores["crps"].append(
-                    mean(
-                        model.get_numerical_CRPS(
-                            y,
-                            pred,
-                            lower=y.min() - target_range * 0.05,
-                            upper=y.max() + target_range * 0.05,
-                            count=100,
-                            divide=False,
-                        ).cpu()
-                    )
-                )
-                scores["_alphas"].append(model.get_F_at_y(y, pred).cpu())  # collect alphas
+
             scores["logscore"] = mean(scores["logscore"])
-            scores["crps"] = mean(scores["crps"])
 
             if scores["logscore"] < min_logscore:
                 min_logscore = scores["logscore"]
                 best_logscore_std = std
 
-            if scores["crps"] < min_crps:
-                min_crps = scores["crps"]
-                best_crps_std = std
-
     print(f"Logscore: {min_logscore:.5f} at std: {best_logscore_std:.5f}")
     model.best_std = best_logscore_std
-    print(f"CRPS: {min_crps:.5f} at std: {best_crps_std:.5f}")
     print("grid search end.", end="\r")
 
 
