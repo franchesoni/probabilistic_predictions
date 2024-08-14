@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets import get_dataset
-from methods import get_method
+from methods import get_method, MCD
 
 
 # debug util
@@ -46,13 +46,12 @@ def main(
     tag="",
     device="cuda:0",
 ):
-    assert dataset_name == "bishop_toy", "Only bishop_toy is supported for now"
     # utils
     seed_everything(seed)
     torch.autograd.set_detect_anomaly(True)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     tag = "_" + tag if tag else ""
-    writer = SummaryWriter(comment=f"_{method_name}{tag}")
+    writer = SummaryWriter(comment=f"_{method_name}_{dataset_name.replace(' ', '_')}_{tag}")
     dstdir = Path(writer.get_logdir())
     # data
     trainds = get_dataset(dataset_name, split="train", n_samples=100000)
@@ -105,7 +104,7 @@ def main(
     while True:
         for x, y in traindl:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-            x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
+            x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1).float()
             optimizer.zero_grad()
             pred = model(x)
             pred.retain_grad()  # debug
@@ -116,7 +115,7 @@ def main(
             optimizer.step()
             loss_value = loss.item()
 
-            if (global_step + 1) % val_every == 0:
+            if (val_every is not None) and ((global_step + 1) % val_every == 0):
                 val_scores = validate(traindl, valdl, model, optimizer, device)
                 for score_name, score_value in val_scores.items():
                     if score_name.startswith("_alphas"):
@@ -140,6 +139,15 @@ def main(
                 break
         if end_training:
             break
+
+    if isinstance(model, MCD):
+        std_grid_search(
+            std_bounds=[0.01, 0.2],
+            num_samples=10,
+            val_dl=valdl,
+            model=model,
+            device=device
+        )
 
     # evaluate on test
     final_scores = validate(traindl, testdl, model, optimizer, device)
@@ -165,7 +173,7 @@ def main(
     plt.xlabel(r"$\alpha$")
     plt.ylabel("Frequency")
     plt.savefig(dstdir / "PIT_hist.png")
-    print("Time to plot PIT hist:", time() - st)
+    print(f"Time to plot PIT hist: {(time() - st):.4f}")
     st = time()
 
     plt.figure()
@@ -178,7 +186,7 @@ def main(
     plt.xlabel(r"$\alpha$")
     plt.ylabel(r"$\alpha_{(i)}/N$")
     plt.savefig(dstdir / "reliability.png")
-    print("Time to plot reliability:", time() - st)
+    print(f"Time to plot reliability: {(time() - st):.4f}")
     st = time()
 
     if dataset_name == "bishop_toy":
@@ -189,8 +197,13 @@ def main(
         x_vis = torch.linspace(-0.1, 1.1, 1000).reshape(-1, 1).to(device)
 
         # Calculate the PDF values for the grid
+        model.eval()
         with torch.no_grad():
-            params = model(x_vis)
+            if isinstance(model, MCD):
+                model.turn_on_dropout()
+                params = model.predict_ensemble(x_vis)
+            else:
+                params = model(x_vis)
             energy = model.get_logscore_at_y(
                 y_grid.expand(x_vis.shape[0], -1).contiguous(), params
             )
@@ -243,9 +256,36 @@ def main(
             plt.savefig(dstdir / f"{cbar_name}.png")
 
 
-def validate(train_dl, val_dl, model, optim, device):
-    print("validating...", end="/r")
+def std_grid_search(std_bounds, num_samples, val_dl, model, device):
     model.eval()
+    model.turn_on_dropout()
+    with torch.no_grad():
+        print("grid searching std...", end="\r")
+        seed_everything(0)
+        min_logscore = float("inf")
+        for std in torch.linspace(*std_bounds, num_samples):
+            scores = {"logscore": []}
+            for x, y in tqdm.tqdm(val_dl):
+                x, y = x.to(device), y.to(device)
+                x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
+                pred = model.predict_ensemble(x, std=std)
+                scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
+
+            scores["logscore"] = mean(scores["logscore"])
+
+            if scores["logscore"] < min_logscore:
+                min_logscore = scores["logscore"]
+                best_logscore_std = std
+
+    print(f"Logscore: {min_logscore:.5f} at std: {best_logscore_std:.5f}")
+    model.best_std = best_logscore_std
+    print("grid search end.", end="\r")
+
+
+def validate(train_dl, val_dl, model, optim, device):
+    model.eval()
+    if isinstance(model, MCD):
+        model.turn_on_dropout()
     with torch.no_grad():
         scores = {"logscore": [], "crps": [], "_alphas": []}
         print("validating...", end="\r")
@@ -253,7 +293,16 @@ def validate(train_dl, val_dl, model, optim, device):
         for x, y in tqdm.tqdm(val_dl):
             x, y = x.to(device), y.to(device)
             x, y = x.reshape(x.shape[0], -1).float(), y.reshape(y.shape[0], -1)
-            pred = model(x)
+            if isinstance(model, MCD):
+                pred = model.predict_ensemble(x)
+                # print(f"pred shape: {pred.shape}")
+                # print(f"pred: {pred[0]}")
+                # print(f"pred min-max: {pred.min()}, {pred.max()}")
+            else:
+                pred = model(x)
+                # print(f"pred shape: {pred.shape}")
+                # print(f"pred: {pred[0]}")
+                # print(f"pred min-max: {pred.min()}, {pred.max()}")
             scores["logscore"].append(model.get_logscore_at_y(y, pred).cpu())
             target_range = y.max() - y.min()
             scores["crps"].append(
@@ -286,7 +335,7 @@ def validate(train_dl, val_dl, model, optim, device):
             .cpu()
             .numpy()
         )
-    print("done validating.", end="/r")
+    print("done validating.", end="\r")
     model.train()
     return scores
 
