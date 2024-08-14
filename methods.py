@@ -23,7 +23,6 @@ class MLP(nn.Module):
                 layers.append(
                     nn.Dropout(p=self.dropout_p)
                 )
-        layers.append(nn.Sigmoid())
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
