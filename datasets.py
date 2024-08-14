@@ -186,9 +186,10 @@ def get_dataset(dataset_name, **kwargs):
     if dataset_name == "bishop_toy":
         return BishopToy(**kwargs)
     elif dataset_name in ucireponames.values():
-        return UCIRepoDataset(dataset_name)
+        return UCIRepoDataset(dataset_name, **kwargs)
     else:
         raise ValueError(f"Unknown dataset {dataset_name}")
+
 
 
 # # load once
