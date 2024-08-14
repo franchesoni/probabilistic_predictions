@@ -360,6 +360,18 @@ class CRPSQR(PinballLoss):
             return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
 
 
+class LogScoreQR(PinballLoss):
+    def loss(self, batch_y, pred_params):
+        self.do_sort = False
+        bin_borders = self.prepare_params(pred_params)["bin_borders"]
+        self.do_sort = True
+        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+        if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
+            return super().loss(batch_y, pred_params)
+        else:
+            return get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
+
+
 class IQN(ProbabilisticMethod, nn.Module):
     def __init__(self, layer_sizes, n_layers_h=3, cos_n=64, **kwargs):
         # here we init the iqn, which is composed by h and phi. These are separate networks.
@@ -965,6 +977,8 @@ def get_method(method_name):
         return CRPSHist
     elif method_name == "crpsqr":
         return CRPSQR
+    elif method_name == "logscoreqr":
+        return LogScoreQR
     elif method_name == "iqn":
         return IQN
     else:
