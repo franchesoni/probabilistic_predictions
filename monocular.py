@@ -164,13 +164,15 @@ def train(
     method_kwargs={},
     seed=1,
     dsfactor=8,
-    device="cuda:0"
+    device="cuda",
+    tag=""
 ):
     # utils
     seed_everything(seed)
     torch.autograd.set_detect_anomaly(True)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter(comment=f"{method_name}")
+    tag = f"_{tag}" if tag else ""
+    writer = SummaryWriter(comment=f"{method_name}{tag}")
     # model
     model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
     model.scratch.output_conv[4] = torch.nn.Conv2d(
