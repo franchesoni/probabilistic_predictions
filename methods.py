@@ -117,6 +117,26 @@ class LaplaceLogScore(ProbabilisticMethod, nn.Module):
         return torch.stack([mu, blogits], dim=1)
 
 
+class LaplaceCRPS(LaplaceLogScore):
+    def __init__(self, layer_sizes, **kwargs):
+        """
+        `layer_sizes` is a list of neurons for each layer, the first element being the dimension of the input.
+        It does not include the last layer.
+        """
+        super(LaplaceCRPS, self).__init__(layer_sizes)
+        self.model = MLP(layer_sizes + [2], **kwargs)
+
+    def get_crps_at_y(self, batch_y, pred_params):
+        mus, bs = pred_params[:, 0:1], pred_params[:, 1:]
+        crps = bs * (torch.abs(batch_y - mus)/bs + torch.exp(-torch.abs(batch_y - mus)/bs) - 3/4)
+        return crps
+
+    def loss(self, batch_y, pred_params):
+        return self.get_crps_at_y(
+            batch_y, pred_params
+        ).mean()  # we should use sum but the mean has more deceent magnitude
+
+
 class LaplaceGlobalWidth(ProbabilisticMethod, nn.Module):
     def __init__(self, layer_sizes, train_width=True, **kwargs):
         """
@@ -348,6 +368,32 @@ class CRPSQR(PinballLoss):
             return super().loss(batch_y, pred_params)
         else:
             return get_crps_PL(batch_y, **self.prepare_params(pred_params)).mean()
+
+
+class LogScoreQR(PinballLoss):
+    def loss(self, batch_y, pred_params):
+        self.do_sort = False
+        bin_borders = self.prepare_params(pred_params)["bin_borders"]
+        self.do_sort = True
+        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+        if (bin_widths < 0).any():  # bins are unordered, crps can't be computed
+            return super().loss(batch_y, pred_params)
+        else:
+            return get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
+
+
+class LogScoreQR2(PinballLoss):
+    """This loss doesn't default to pinball when the ordering of the predicted bins isn't right. Instead, it penalizes disorder and monotonizes the borders to compute the logscore. Extremes aren't handled nicely, needs improvement."""
+    def loss(self, batch_y, pred_params):
+        self.do_sort = False
+        bin_borders = self.prepare_params(pred_params)["bin_borders"]
+        self.do_sort = True
+        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
+        ordering_penalty = torch.nn.functional.relu(-bin_widths).sum()  # those that are negative
+        bin_borders = torch.concatenate((bin_borders[:,0:1], bin_borders[:, :-1]+torch.nn.functional.relu(bin_widths)), dim=1)
+        return ordering_penalty + get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
+
+
 
 
 class IQN(ProbabilisticMethod, nn.Module):
@@ -976,6 +1022,7 @@ if __name__ == "__main__":
 
 method_names = [
     "laplacescore",
+    "laplacecrps",
     "laplacewb",
     "mdn",
     "ce",
@@ -989,6 +1036,8 @@ method_names = [
 def get_method(method_name):
     if method_name == "laplacescore":
         return LaplaceLogScore
+    elif method_name == "laplacecrps":
+        return LaplaceCRPS
     elif method_name == "laplacewb":
         return LaplaceGlobalWidth
     elif method_name == "mdn":
@@ -1001,6 +1050,8 @@ def get_method(method_name):
         return CRPSHist
     elif method_name == "crpsqr":
         return CRPSQR
+    elif method_name == "logscoreqr":
+        return LogScoreQR
     elif method_name == "iqn":
         return IQN
     elif method_name == "mcd":
