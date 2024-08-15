@@ -379,17 +379,6 @@ class LogScoreQR(PinballLoss):
             return get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
 
 
-class LogScoreQR2(PinballLoss):
-    """This loss doesn't default to pinball when the ordering of the predicted bins isn't right. Instead, it penalizes disorder and monotonizes the borders to compute the logscore. Extremes aren't handled nicely, needs improvement."""
-    def loss(self, batch_y, pred_params):
-        self.do_sort = False
-        bin_borders = self.prepare_params(pred_params)["bin_borders"]
-        self.do_sort = True
-        bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (N, B)
-        ordering_penalty = torch.nn.functional.relu(-bin_widths).sum()  # those that are negative
-        bin_borders = torch.concatenate((bin_borders[:,0:1], bin_borders[:, :-1]+torch.nn.functional.relu(bin_widths)), dim=1)
-        return ordering_penalty + get_logscore_at_y_PL(batch_y, **self.prepare_params(pred_params)).mean()
-
 
 
 
@@ -621,7 +610,7 @@ def handle_input(batch_y, cdf_at_borders, bin_masses, bin_borders):
     if cdf_at_borders is None:
         cdf_at_borders = torch.cat(
             (
-                torch.zeros((N, 1), device=batch_y.device),
+                torch.zeros((N, 1), device=bin_masses.device),
                 torch.cumsum(bin_masses, dim=1),
             ),
             dim=1,
@@ -655,8 +644,7 @@ def get_logscore_at_y_PL(batch_y, cdf_at_borders, bin_masses, bin_borders):
     if bin_masses is None:
         bin_masses = cdf_at_borders[:, 1:] - cdf_at_borders[:, :-1]  # (1N, B)
     bin_widths = bin_borders[:, 1:] - bin_borders[:, :-1]  # (1N, B)
-    bin_densities = bin_masses / bin_widths  # (1N, B)
-    bin_densities[torch.isinf(bin_densities)] = 0
+    bin_densities = bin_masses / bin_widths
     y_bin = torch.clamp(
         torch.searchsorted(
             (
