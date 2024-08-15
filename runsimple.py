@@ -32,7 +32,7 @@ def seed_everything(seed):
 def main(
     method_name,
     method_kwargs=dict(),
-    max_seconds=60,
+    max_seconds=300,
     batch_size=128,
     num_workers=32,
     lr=1e-4,
@@ -156,14 +156,15 @@ def main(
         final_scores["_alphas_rank"],
     )
 
-    print(
-        "\n"+
+    strtosave = (f"{method_name}_{dataset_name}\n"+
         f"Final results:\n"
-        +f"Logscore: {final_scores['logscore']}, CRPS: {final_scores['crps']}, ECE: {final_scores['ece']}"
-    )
+        +f"Logscore:\n{final_scores['logscore']}\nCRPS:\n{final_scores['crps']}\nECE\n{final_scores['ece']}")
+    print(strtosave)
 
     # figures and log
     dstdir.mkdir(parents=True, exist_ok=True)
+    with open(dstdir / "results.txt", "w") as f:
+        f.write(strtosave)
     st = time()
 
     # increase font size
