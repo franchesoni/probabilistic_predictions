@@ -210,9 +210,6 @@ def main(
             (energy.cpu().numpy(), "Energy"),
         ]:
             plt.figure(figsize=(10, 6))
-            plt.scatter(
-                trainds.X.cpu().numpy(), trainds.Y.cpu().numpy(), s=1, label="Data"
-            )
             plt.pcolormesh(
                 x_vis_np,
                 y_grid_np,
@@ -220,6 +217,9 @@ def main(
                 shading="auto",
                 cmap="viridis",
                 alpha=0.9,
+            )
+            plt.scatter(
+                trainds.X.cpu().numpy(), trainds.Y.cpu().numpy(), s=1, label="Data", color="r"
             )
 
             # Add labels and legend
