@@ -23,6 +23,7 @@ Towards Accurate and Reliable Deep Regression Models (thesis)
 Generalized Score Matching for Regression
 Probabilistic Matching of Real and Generated Data Statistics in Generative Adversarial Networks
 Learning Proposals for Practical Energy-Based Regression
+Evaluating Scalable Bayesian Deep Learning Methods for Robust Computer Vision
 
 
 
