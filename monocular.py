@@ -10,7 +10,7 @@ import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import cv2
 from numpy import nanmean as mean
-from torch.optim import AdamW
+from torch.optim import AdamW, Adam
 
 from methods import get_method
 
@@ -20,6 +20,15 @@ def bp():
     import ipdb
 
     ipdb.set_trace()
+
+def norm_tensor(x):
+    # this function is for tensors of shape (B, H, W)
+    maxs, mins = (
+        x.max(dim=2)[0].max(dim=1)[0][:, None, None],
+        x.min(dim=2)[0].min(dim=1)[0][:, None, None],
+    )
+    return (x - mins) / (maxs - mins)
+
 
 
 def fast_collate(batch):
@@ -113,11 +122,12 @@ class Scenenet(torch.utils.data.Dataset):
     def __getitem__(self, index):
         # Load image
         imgpath, depthpath = self.images[index], self.depths[index]
-        img, depth = cv2.imread(str(imgpath)), cv2.imread(
+        img = cv2.imread(str(imgpath))  # read in BGR, the network doesn't care
+        depth = cv2.imread(
             str(depthpath), cv2.IMREAD_UNCHANGED
         ).astype(
             int
-        )  # read in BGR, the network doesn't care
+        )
         return img, depth
 
     def __len__(self):
@@ -134,12 +144,13 @@ def gpu_transform(img, depth):
         img, size=(256, 256), mode="bilinear"
     ), torch.nn.functional.interpolate(logdepth, size=(256, 256), mode="bilinear")
     B = img.shape[0]
-    logdepth = logdepth - torch.median(logdepth.view(B, -1), dim=1)[0].view(
-        B, 1, 1, 1
-    )  # center the depth
-    logdepth = logdepth / torch.mean(logdepth.abs().view(B, -1), dim=1).view(
-        B, 1, 1, 1
-    )  # normalize the depth
+    # logdepth = logdepth - torch.median(logdepth.view(B, -1), dim=1)[0].view(
+    #     B, 1, 1, 1
+    # )  # center the depth
+    # logdepth = logdepth / torch.mean(logdepth.abs().view(B, -1), dim=1).view(
+    #     B, 1, 1, 1
+    # )  # normalize the depth
+    logdepth = logdepth / 10.0  # normalize the depth
     return img, logdepth
 
 def seed_everything(seed):
@@ -155,7 +166,6 @@ def train(
     batch_size=64,
     lr=1e-4,
     beta=0.9,
-    warmup_steps=500,
     val_every=200,
     weight_decay=0.001,
     num_workers=96,
@@ -169,15 +179,22 @@ def train(
 ):
     # utils
     seed_everything(seed)
-    torch.autograd.set_detect_anomaly(True)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     tag = f"_{tag}" if tag else ""
     writer = SummaryWriter(comment=f"{method_name}{tag}")
     # model
-    model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
-    model.scratch.output_conv[4] = torch.nn.Conv2d(
-        32, embedding_dim, kernel_size=(1, 1), stride=(1, 1)
-    )  # this last layer is the one that outputs the depth, we will make it output a big vector instead
+    # model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
+    # model.scratch.output_conv[4] = torch.nn.Conv2d(
+    #     32, embedding_dim, kernel_size=(1, 1), stride=(1, 1)
+    # )  # this last layer is the one that outputs the depth, we will make it output a big vector instead
+    import torchvision
+    model = torchvision.models.segmentation.deeplabv3_resnet50(num_classes=embedding_dim)
+    # deactivate batch norm
+    for module in model.modules():
+        if isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.BatchNorm2d) or isinstance(module, torch.nn.BatchNorm1d):
+            module.weight.requires_grad_(False)
+            module.bias.requires_grad_(False)
+
     method = get_method(method_name)(layer_sizes=[512], **method_kwargs)
     model = model.to(device)
     method = method.to(device)
@@ -206,29 +223,61 @@ def train(
         device=device,
     )
     # optim
-    optim = AdamW(
-        list(model.parameters()) + list(method.parameters()),
+    optim = Adam(
+        list(model.parameters()),# + list(method.parameters()),
         lr=lr,
         betas=(beta, 0.999),
         weight_decay=weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optim, max_lr=lr, total_steps=2000, pct_start=0.05
     )
 
     model.train()
     method.train()
 
+    method.loss = torch.nn.L1Loss()    # debug
+    show_every = 200  # debug
+
     st = time.time()
     global_step = 0
     while not (time.time() - st > max_seconds):
         for imgs, logdepths in dl:
-            embeddings = model(imgs)  # (B, E, H, W)
+            embeddings = model(imgs)['out']  # (B, E, H, W)
             embeddings, logdepths = reshape_downsample(embeddings, logdepths, dsfactor)
             params = method(embeddings)  # (BHdsWds, P)
+
+            # debug init
+            if global_step % show_every == 0:
+                # show 8 images
+                vis_imgs = (
+                    torch.concatenate(
+                        list(imgs[:8].permute(0, 2, 3, 1).add(0.5).mul(255)), dim=1
+                    )
+                    .to(torch.uint8)
+                    .cpu()
+                    .numpy()[..., ::-1]
+                )  # RGB
+                vis_targets = (
+                    torch.concatenate(
+                        list(norm_tensor(logdepths.reshape(imgs.shape[0], 1, imgs.shape[2], imgs.shape[3])[:8, 0]).mul(255).to(torch.uint8)),
+                        dim=1,
+                    ).to(torch.uint8).cpu().numpy()
+                )
+                vis_out = (  torch.concatenate(list(norm_tensor(params.reshape(imgs.shape[0], 1, imgs.shape[2], imgs.shape[3])[:8, 0]).mul(255).to(torch.uint8)), dim=1)             ).cpu().numpy()
+                cv2.imwrite(f"imgs/vis_out_{global_step}.png", vis_out)
+                cv2.imwrite(f"imgs/vis_imgs2_{global_step}.png", vis_imgs)
+                cv2.imwrite(f"imgs/vis_targets_{global_step}.png", vis_targets)
+                print(vis_out.min(), vis_out.max())
+                # debug end
+
             loss = method.loss(logdepths, params)
             loss.backward()
             optim.step()
+            scheduler.step()
             loss_value = loss.item()
 
-            if global_step % val_every == 0:  # maybe validate
+            if global_step and global_step % val_every == 0:  # maybe validate
                 del embeddings, params, loss
                 torch.cuda.empty_cache()
                 val_scores, vis_imgs, vis_target = validate(
@@ -285,6 +334,8 @@ def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
 
     model.eval()
     method.eval()
+    
+    val_dsfactor = 1  # debug
 
     # validation
     with torch.no_grad():
@@ -292,7 +343,7 @@ def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
         print("validating...", end="\r")
         seed_everything(0)
         for imgs, logdepths in tqdm.tqdm(val_dl):
-            embeddings = model(imgs)  # (B, E, H, W)
+            embeddings = model(imgs)['out']  # (B, E, H, W)
             embeddings, targets = reshape_downsample(embeddings, logdepths, dsfactor=val_dsfactor)
             params = method(embeddings)  # (BHdsWds, P)
             scores["logscore"].append(method.get_logscore_at_y(targets, params).cpu())
@@ -322,14 +373,6 @@ def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
             .numpy()[..., ::-1]
         )  # RGB
 
-        def norm_tensor(x):
-            # this function is for tensors of shape (B, H, W)
-            maxs, mins = (
-                x.max(dim=2)[0].max(dim=1)[0][:, None, None],
-                x.min(dim=2)[0].min(dim=1)[0][:, None, None],
-            )
-            return (x - mins) / (maxs - mins)
-
         vis_target = (
             torch.concatenate(
                 list(norm_tensor(logdepths[:8, 0]).mul(255).to(torch.uint8)),
@@ -338,6 +381,12 @@ def validate(train_dl, val_dl, model, method, optim, val_dsfactor=8):
             .cpu()
             .numpy()
         )
+        # debug init
+        vis_out = (
+            torch.concatenate(list(norm_tensor(params.reshape(logdepths.shape)[:8, 0]).mul(255).to(torch.uint8)), dim=1)
+        ).cpu().numpy()
+        cv2.imwrite("imgs/vis_out.png", vis_out)
+        # debug end
         scores = {k: v / len(val_dl) for k, v in scores.items()}
     print("done validating.", end="/r")
     # schedulefree setup

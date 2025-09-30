@@ -130,3 +130,39 @@ what recommendations can we make?
 
 other notes:
 - compute the skill for each dataset
+
+results
+mcd_Abalone
+Final results:
+Logscore:
+-0.785552442073822, CRPS:
+0.04069489613175392, ECE: 
+0.0961744412779808
+
+mcd_Concrete Compressive Strength
+Final results:
+Logscore: 
+-0.7493574619293213, CRPS: 
+0.06335991621017456, ECE: 
+0.03806642070412636
+
+mcd_Energy Efficiency
+Final results:
+Logscore: 
+-1.128684401512146, CRPS: 
+0.04289770871400833, ECE: 
+0.052702706307172775
+
+mcd_Liver Disorders
+Final results:
+Logscore: 
+1.0825471878051758, CRPS: 
+0.09403250366449356, ECE: 
+0.18057124316692352
+
+mcd_Parkinsons Telemonitoring
+Final results:
+Logscore: 
+-0.013763457536697388, CRPS: 
+0.12243806570768356, ECE: 
+0.03999200835824013
